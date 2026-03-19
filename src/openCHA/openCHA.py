@@ -14,6 +14,7 @@ from openCHA.utils import parse_addresses
 from pydantic import BaseModel, Field
 
 from openCHA.llms.multi_llm_manager import MultiLLMManager
+from openCHA.evaluation.logger import save_evaluation
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,12 @@ class openCHA(BaseModel):
             parallel=parallel,
             **kwargs
         )
+
+        try:
+            save_evaluation(result, query)
+            logger.info("Avaliações salvas com sucesso")
+        except Exception as e:
+            logger.warning(f"Erro ao salvar avaliação: {e}")
 
         logger.info(
             f"Comparação concluída: {result['metadata']['success_count']} sucessos, "
@@ -373,7 +380,6 @@ class openCHA(BaseModel):
                         f"  ├─ Completude: {evaluation['completeness']['score']}",
                         f"  ├─ Relevância: {evaluation['relevance']['score']}",
                         f"  ├─ Segurança: {evaluation['safety']['score']}",
-                        f"  ├─ Contexto: {evaluation['context_adherence']['score']}",
                         f"  └─ Score final: {evaluation['final_score']}",
                     ])
 
