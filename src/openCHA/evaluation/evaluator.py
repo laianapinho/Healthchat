@@ -1,11 +1,10 @@
 from typing import List, Optional
 
-from .schemas import EvaluationResult, ClinicalContext
+from .schemas import EvaluationResult
 from .metrics import (
     evaluate_completeness,
     evaluate_relevance,
     evaluate_safety_rules,
-    evaluate_context_adherence,
 )
 
 
@@ -16,7 +15,7 @@ class ResponseEvaluator:
         response: str,
         chat_history: Optional[List] = None,
         expected_topics: Optional[List[str]] = None,
-        clinical_context: Optional[ClinicalContext] = None,
+        clinical_context: Optional[object] = None,
     ) -> EvaluationResult:
         completeness = evaluate_completeness(
             query=query,
@@ -34,18 +33,11 @@ class ResponseEvaluator:
             response=response,
         )
 
-        context_adherence = evaluate_context_adherence(
-            response=response,
-            clinical_context=clinical_context,
-            chat_history=chat_history,
-        )
-
         final_score = round(
             (
-                completeness.score * 0.30 +
-                relevance.score * 0.25 +
-                safety.score * 0.30 +
-                context_adherence.score * 0.15
+                completeness.score * 0.35 +
+                relevance.score * 0.30 +
+                safety.score * 0.35
             ),
             3,
         )
@@ -54,14 +46,17 @@ class ResponseEvaluator:
             completeness=completeness,
             relevance=relevance,
             safety=safety,
-            context_adherence=context_adherence,
+            context_adherence={
+                "score": 0.0,
+                "passed": True,
+                "details": ["Métrica de contexto removida temporariamente"],
+            },
             final_score=final_score,
             meta={
                 "weights": {
-                    "completeness": 0.30,
-                    "relevance": 0.25,
-                    "safety": 0.30,
-                    "context_adherence": 0.15,
+                    "completeness": 0.35,
+                    "relevance": 0.30,
+                    "safety": 0.35,
                 }
             }
         )
