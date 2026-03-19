@@ -11,6 +11,9 @@ from openCHA.planners import PlannerType
 from openCHA.datapipes import DatapipeType
 from openCHA.response_generators import ResponseGeneratorType
 
+# NOVO
+from openCHA.evaluation import ResponseEvaluator
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,6 +34,10 @@ class MultiLLMResultFull(TypedDict):
     planning_times: Dict[str, Optional[float]]
     generation_times: Dict[str, Optional[float]]
     errors: Dict[str, Optional[str]]
+
+    # NOVO
+    evaluations: Dict[str, Optional[Dict[str, Any]]]
+
     metadata: Dict[str, Any]
 
 
@@ -39,10 +46,13 @@ def retry_on_failure(max_retries: int = 2, delay: float = 1.0):
         @wraps(func)
         def wrapper(*args, **kwargs):
             last_exception = None
+
             for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
+
                 except Exception as e:
+
                     last_exception = e
                     error_msg = str(e).lower()
 
@@ -50,21 +60,28 @@ def retry_on_failure(max_retries: int = 2, delay: float = 1.0):
                         raise
 
                     if attempt < max_retries:
+
                         wait_time = delay * (2 ** attempt)
+
                         logger.warning(
                             f"Tentativa {attempt + 1}/{max_retries + 1} falhou: {e}. "
                             f"Tentando novamente em {wait_time}s..."
                         )
+
                         time.sleep(wait_time)
+
                     else:
                         logger.error(f"Todas as {max_retries + 1} tentativas falharam")
 
             raise last_exception
+
         return wrapper
+
     return decorator
 
 
 class MultiLLMManager:
+
     def __init__(
         self,
         enable_cache: bool = False,
@@ -75,7 +92,8 @@ class MultiLLMManager:
         restrict_to_health_only: bool = False,
         use_llm_classifier: bool = False
     ):
-        logger.info("🔧 Inicializando MultiLLMManager com ORQUESTRAÇÃO COMPLETA...")
+
+        logger.info("🔧 Inicializando MultiLLMManager...")
 
         self.enable_cache = enable_cache
         self.default_timeout = default_timeout
@@ -83,10 +101,13 @@ class MultiLLMManager:
         self.enable_retry = enable_retry
         self.retry_attempts = retry_attempts
 
-        self.restrict_to_health_only = False
-        self.use_llm_classifier = False
+        self.restrict_to_health_only = restrict_to_health_only
+        self.use_llm_classifier = use_llm_classifier
 
         self._cache: Dict[str, Dict[str, Any]] = {}
+
+        # NOVO
+        self.evaluator = ResponseEvaluator()
 
         self.available_models = {
             "chatgpt": LLMType.OPENAI,
@@ -95,50 +116,70 @@ class MultiLLMManager:
         }
 
         self.models: Dict[str, LLMType] = {}
+
         self._initialize_models()
 
         logger.info(
             f"✅ MultiLLMManager inicializado com {len(self.models)} modelos: "
-            f"{', '.join(self.models.keys())} | Domínio: GERAL"
+            f"{', '.join(self.models.keys())}"
         )
 
     def _initialize_models(self) -> None:
-        logger.info(f"🔧 Inicializando modelos: {', '.join(self.available_models.keys())}")
+
+        logger.info("Inicializando modelos...")
 
         test_query = "What is 2 + 2?"
 
         for name, llm_type in self.available_models.items():
-            try:
-                llm = initialize_llm(llm_type)
-                test_response = llm.generate(test_query, max_tokens=50, temperature=0)
 
-                if test_response and isinstance(test_response, str) and len(test_response.strip()) > 0:
+            try:
+
+                llm = initialize_llm(llm_type)
+
+                test_response = llm.generate(
+                    test_query,
+                    max_tokens=50,
+                    temperature=0
+                )
+
+                if test_response and len(test_response.strip()) > 0:
+
                     self.models[name] = llm_type
-                    logger.info(f"✅ {name.upper()} inicializado e validado")
+
+                    logger.info(f"✅ {name.upper()} inicializado")
+
                 else:
-                    logger.warning(f"⚠️ {name.upper()} retornou resposta vazia na validação")
+
+                    logger.warning(f"⚠️ {name.upper()} resposta vazia")
 
             except Exception as e:
-                logger.warning(f"⚠️ {name.upper()} falhou na validação: {type(e).__name__}: {e}")
+
+                logger.warning(
+                    f"⚠️ {name.upper()} falhou: {type(e).__name__}: {e}"
+                )
 
         if not self.models:
             raise RuntimeError(
-                "❌ Nenhum modelo LLM foi inicializado com sucesso!\n"
-                "Verifique suas API keys."
+                "❌ Nenhum modelo foi inicializado"
             )
 
     def get_available_models(self) -> List[str]:
+
         return list(self.models.keys())
 
     def clear_cache(self) -> None:
+
         self._cache.clear()
-        logger.info("🗑️ Cache limpo")
+
+        logger.info("Cache limpo")
 
     def _estimate_tokens(self, text: str) -> int:
+
         return len(text) // 4 if text else 0
 
     def _create_orchestrator_for_model(self, model_type: LLMType) -> Orchestrator:
-        orchestrator = Orchestrator.initialize(
+
+        return Orchestrator.initialize(
             planner_llm=model_type,
             planner_name=PlannerType.TREE_OF_THOUGHT,
             datapipe_name=DatapipeType.MEMORY,
@@ -150,7 +191,6 @@ class MultiLLMManager:
             verbose=False,
             restrict_to_health_only=False,
         )
-        return orchestrator
 
     def _generate_with_model_orchestrated(
         self,
@@ -160,12 +200,17 @@ class MultiLLMManager:
         timeout: int,
         **kwargs
     ) -> LLMFullResponse:
+
         start_time = time.time()
 
         try:
+
             cache_key = hashlib.md5(f"{name}:{query}".encode()).hexdigest()
+
             if self.enable_cache and cache_key in self._cache:
+
                 cached = self._cache[cache_key]
+
                 return {
                     "content": cached["content"],
                     "time_ms": cached.get("time_ms", 0.0),
@@ -177,71 +222,66 @@ class MultiLLMManager:
                     "generation_time_ms": cached.get("generation_time_ms", 0.0),
                 }
 
-            def generate_with_orchestration() -> Tuple[Optional[str], float, float]:
+            def generate():
+
                 orchestrator = self._create_orchestrator_for_model(model_type)
 
-                # ✅ ALTERAÇÃO: Orchestrator devolve tempos REAIS
                 response, timings = orchestrator.run(
                     query=query,
                     meta=[],
                     history="",
                     use_history=False,
-                    return_timings=True,   # ✅ ALTERAÇÃO
+                    return_timings=True,
                     **kwargs
                 )
 
-                planning_ms = float(timings.get("planning_time_ms", 0.0))
-                generation_ms = float(timings.get("generation_time_ms", 0.0))
-                return response, planning_ms, generation_ms
+                planning = float(timings.get("planning_time_ms", 0.0))
+                generation = float(timings.get("generation_time_ms", 0.0))
+
+                return response, planning, generation
 
             if self.enable_retry:
-                generate_func = retry_on_failure(max_retries=self.retry_attempts, delay=1.0)(generate_with_orchestration)
-            else:
-                generate_func = generate_with_orchestration
+
+                generate = retry_on_failure(
+                    max_retries=self.retry_attempts
+                )(generate)
 
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(generate_func)
-                try:
-                    response, planning_ms, generation_ms = future.result(timeout=timeout)
-                except FuturesTimeoutError:
-                    future.cancel()
-                    raise TimeoutError(f"Timeout após {timeout}s")
 
-            elapsed_ms = round((time.time() - start_time) * 1000, 2)
+                future = executor.submit(generate)
+
+                response, planning, generation = future.result(timeout=timeout)
+
+            elapsed = round((time.time() - start_time) * 1000, 2)
 
             if self.enable_cache and response:
+
                 self._cache[cache_key] = {
                     "content": response,
-                    "planning_time_ms": planning_ms,
-                    "generation_time_ms": generation_ms,
-                    "time_ms": elapsed_ms,
+                    "planning_time_ms": planning,
+                    "generation_time_ms": generation,
+                    "time_ms": elapsed,
                 }
-
-            logger.info(
-                f"🧠 {name.upper()} respondeu em {elapsed_ms} ms | "
-                f"Planning (REAL): {planning_ms:.1f}ms | Generation (REAL): {generation_ms:.1f}ms"
-            )
 
             return {
                 "content": response,
-                "time_ms": elapsed_ms,
+                "time_ms": elapsed,
                 "error": None,
                 "model_name": name,
                 "timestamp": time.time(),
-                "tokens_estimate": self._estimate_tokens(response) if response else 0,
-                "planning_time_ms": planning_ms,
-                "generation_time_ms": generation_ms,
+                "tokens_estimate": self._estimate_tokens(response),
+                "planning_time_ms": planning,
+                "generation_time_ms": generation,
             }
 
         except Exception as e:
-            elapsed_ms = round((time.time() - start_time) * 1000, 2)
-            error_msg = str(e)
-            logger.error(f"❌ Erro em {name.upper()}: {error_msg}")
+
+            elapsed = round((time.time() - start_time) * 1000, 2)
 
             return {
                 "content": None,
-                "time_ms": elapsed_ms,
-                "error": error_msg,
+                "time_ms": elapsed,
+                "error": str(e),
                 "model_name": name,
                 "timestamp": time.time(),
                 "tokens_estimate": 0,
@@ -257,98 +297,93 @@ class MultiLLMManager:
         parallel: bool = True,
         **kwargs
     ) -> MultiLLMResultFull:
-        if not query or not query.strip():
-            raise ValueError("Query não pode estar vazia")
 
         if models is None:
-            selected_models = self.models
+            selected = self.models
         else:
-            invalid = [m for m in models if m not in self.models]
-            if invalid:
-                raise ValueError(f"Modelos inválidos: {invalid}. Disponíveis: {self.get_available_models()}")
-            selected_models = {k: v for k, v in self.models.items() if k in models}
+            selected = {k: v for k, v in self.models.items() if k in models}
 
-        if not selected_models:
-            raise ValueError("Nenhum modelo disponível para executar")
+        timeout = timeout or self.default_timeout
 
-        timeout_value = timeout or self.default_timeout
         start_total = time.time()
 
-        if parallel and len(selected_models) > 1:
+        if parallel and len(selected) > 1:
+
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+
                 futures = {
                     name: executor.submit(
                         self._generate_with_model_orchestrated,
                         name,
-                        llm_type,
+                        model,
                         query,
-                        timeout_value,
+                        timeout,
                         **kwargs
                     )
-                    for name, llm_type in selected_models.items()
+                    for name, model in selected.items()
                 }
-                raw_results = {name: future.result() for name, future in futures.items()}
+
+                raw_results = {
+                    name: future.result()
+                    for name, future in futures.items()
+                }
+
         else:
+
             raw_results = {
-                name: self._generate_with_model_orchestrated(name, llm_type, query, timeout_value, **kwargs)
-                for name, llm_type in selected_models.items()
+                name: self._generate_with_model_orchestrated(
+                    name,
+                    model,
+                    query,
+                    timeout,
+                    **kwargs
+                )
+                for name, model in selected.items()
             }
 
-        total_time_ms = round((time.time() - start_total) * 1000, 2)
+        total_time = round((time.time() - start_total) * 1000, 2)
+
+        # NOVO — avaliação das respostas
+
+        evaluations: Dict[str, Optional[Dict[str, Any]]] = {}
+
+        for name, res in raw_results.items():
+
+            if res["content"] and not res["error"]:
+
+                evaluation = self.evaluator.evaluate(
+                    query=query,
+                    response=res["content"]
+                )
+
+                evaluations[name] = evaluation.model_dump()
+
+            else:
+
+                evaluations[name] = None
 
         result: MultiLLMResultFull = {
-            "responses": {name: res["content"] for name, res in raw_results.items()},
-            "times": {name: res["time_ms"] for name, res in raw_results.items()},
-            "planning_times": {name: res["planning_time_ms"] for name, res in raw_results.items()},
-            "generation_times": {name: res["generation_time_ms"] for name, res in raw_results.items()},
-            "errors": {name: res["error"] for name, res in raw_results.items()},
+
+            "responses": {n: r["content"] for n, r in raw_results.items()},
+            "times": {n: r["time_ms"] for n, r in raw_results.items()},
+            "planning_times": {n: r["planning_time_ms"] for n, r in raw_results.items()},
+            "generation_times": {n: r["generation_time_ms"] for n, r in raw_results.items()},
+            "errors": {n: r["error"] for n, r in raw_results.items()},
+
+            # NOVO
+            "evaluations": evaluations,
+
             "metadata": {
-                "total_time_ms": total_time_ms,
+                "total_time_ms": total_time,
                 "parallel_execution": parallel,
-                "models_count": len(selected_models),
+                "models_count": len(selected),
                 "success_count": sum(1 for r in raw_results.values() if r["content"]),
                 "failed_count": sum(1 for r in raw_results.values() if r["error"]),
                 "total_tokens_estimate": sum(r["tokens_estimate"] for r in raw_results.values()),
                 "query_length": len(query),
                 "timestamp": time.time(),
                 "execution_type": "full_orchestration",
-                "domain": "general",
-            }
+            },
         }
 
         return result
-
-    def compare_responses_with_orchestration(
-        self,
-        query: str,
-        models: Optional[List[str]] = None,
-        **kwargs
-    ) -> Dict[str, Any]:
-        result = self.generate_all_with_orchestration(query, models=models, **kwargs)
-
-        comparison = {
-            "query": query,
-            "responses": result["responses"],
-            "performance": {
-                name: {
-                    "total_time_ms": result["times"][name],
-                    "planning_time_ms": result["planning_times"][name],
-                    "generation_time_ms": result["generation_times"][name],
-                    "response_length": len(result["responses"][name]) if result["responses"][name] else 0,
-                    "success": result["errors"][name] is None
-                }
-                for name in result["responses"].keys()
-            },
-            "summary": {
-                "total_time_ms": result["metadata"]["total_time_ms"],
-                "fastest_model": min(
-                    ((k, v) for k, v in result["times"].items() if v is not None and v > 0),
-                    key=lambda x: x[1],
-                    default=(None, None)
-                )[0],
-                "execution_type": "full_orchestration",
-                "domain": "general"
-            }
-        }
-
-        return comparison
