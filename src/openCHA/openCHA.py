@@ -378,7 +378,6 @@ class openCHA(BaseModel):
                         "",
                         "📊 Avaliação:",
                         f"  ├─ Completude: {evaluation['completeness']['score']}",
-                        f"  ├─ Relevância: {evaluation['relevance']['score']}",
                         f"  ├─ Segurança: {evaluation['safety']['score']}",
                         f"  └─ Score final: {evaluation['final_score']}",
                     ])
