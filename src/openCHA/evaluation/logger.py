@@ -19,13 +19,11 @@ def save_evaluation(results: dict, query: str, file_path: str = "results.json"):
             "response": response,
             "metrics": {
                 "completude": evaluation["completeness"]["score"],
-                "relevancia": evaluation["relevance"]["score"],
                 "seguranca": evaluation["safety"]["score"],
                 "final": evaluation["final_score"],
             },
             "tempo_ms": results["times"][model_name],
         }
-
         records.append(record)
 
     if os.path.exists(file_path):
