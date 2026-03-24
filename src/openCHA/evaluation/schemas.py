@@ -10,7 +10,6 @@ class MetricResult(BaseModel):
 
 class EvaluationResult(BaseModel):
     completeness: MetricResult
-    relevance: MetricResult
     safety: MetricResult
     final_score: float
     meta: Dict[str, Any] = Field(default_factory=dict)
