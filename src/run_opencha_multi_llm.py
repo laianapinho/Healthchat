@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 """
-openCHA + Multi-LLM - Teste Simples (CORRIGIDO)
-Compare ChatGPT, Gemini e DeepSeek lado a lado
-
-✅ CORREÇÃO: Pré-inicializa os modelos ANTES de abrir a interface
-   Evita race condition e APIConnectionError
+openCHA + Multi-LLM + BERTScore
+Interface para CSV de questões abertas
+com cálculo de precisão, recall e F1
 """
-from openCHA import openCHA
+from openCHA.main import openCHA
+from openCHA.interface.healthchat_bertscore_multillm_interface import launch_multillm_interface
 
 def main():
-    print("🔷 openCHA + Multi-LLM")
+    print("🔷 openCHA + Multi-LLM + BERTScore")
     print("=" * 50)
 
     # Cria o agente com Multi-LLM habilitado
     cha = openCHA(
         name="openCHA-MultiLLM",
         verbose=False,
-
-        # Configurações Multi-LLM
         multi_llm_enable_cache=True,
         multi_llm_timeout=180,
         multi_llm_max_workers=3,
@@ -26,8 +23,7 @@ def main():
     print("🌐 Pré-inicializando modelos...")
     print("-" * 50)
 
-    # ✅ CORREÇÃO: Força inicialização ANTES de abrir a interface
-    # Isso evita race condition quando a interface tenta usar os modelos
+    # Inicializa os modelos antes de abrir a interface
     try:
         manager = cha.get_multi_llm()
         modelos_disponiveis = manager.get_available_models()
@@ -39,23 +35,20 @@ def main():
 
     print("-" * 50)
     print()
-
-    print("🌐 Iniciando interface web...")
+    print("🌐 Iniciando interface BERTScore CSV + Multi-LLM...")
     print("📍 URL: http://localhost:7860")
-    print("🤖 Modelos: ChatGPT | Gemini | DeepSeek")
-    print("✨ Modo: Comparação Multi-LLM")
     print("🛑 Para parar: Ctrl+C")
     print("=" * 50)
     print()
     print("💡 Como usar:")
-    print("  1. Configure suas API keys na interface")
-    print("  2. Ative 'Modo Multi-LLM' no accordion")
-    print("  3. Selecione os modelos para comparar")
-    print("  4. Digite sua pergunta!")
+    print("  1. Envie seu CSV com Pergunta e Resposta")
+    print("  2. Selecione os modelos: ChatGPT, Gemini e DeepSeek")
+    print("  3. Clique em 'Rodar Benchmark'")
     print()
 
     try:
-        cha.run_with_interface()
+        # 🚀 Chama a nova interface que implementa o BERTScore
+        launch_multillm_interface(cha)
     except KeyboardInterrupt:
         print("\n👋 openCHA encerrado")
 
