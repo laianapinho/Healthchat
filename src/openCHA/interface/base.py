@@ -2,6 +2,11 @@
 import gradio as gr
 import logging
 from typing import List, Tuple, Optional, Any
+import pandas as pd
+from bert_score import score
+from datetime import datetime
+import json
+import os
 
 from openCHA.benchmark_ui_helpers import (
     load_dataset_from_gradio_file,
@@ -12,19 +17,13 @@ from openCHA.benchmark_evaluator import BenchmarkEvaluator
 
 logger = logging.getLogger(__name__)
 
-
 class Interface:
     """
-    Gradio UI com 3 abas:
-      1) Chat normal (single agent)
-      2) Comparação Multi-LLM (Arena) — cards lado a lado
-      3) Benchmark JSON (upload + escolher N + rodar automático)
-
-    Correções aplicadas:
-      - Arena: cards LADO A LADO (Row + Columns)
-      - Arena: usa extract_model_response_from_report (função correta)
-      - Benchmark: usa run_single_question wrapper (compatível com assinatura real do respond)
-      - Benchmark: tabela compatível com headers + ok_* (para CLOSED)
+    Gradio UI com 4 abas:
+      1) Chat normal
+      2) Comparação Multi-LLM (Arena)
+      3) Benchmark JSON
+      4) Benchmark CSV + BERTScore
     """
 
     def __init__(self):
@@ -33,6 +32,28 @@ class Interface:
         self._benchmark_info = None
         logger.info("Interface inicializada")
 
+    # ----------------------------
+    # Funções auxiliares BERTScore
+    # ----------------------------
+    def compute_bertscore(self, hypotheses: list, references: list):
+        P, R, F1 = score(hypotheses, references, lang="pt", batch_size=16)
+        return P.tolist(), R.tolist(), F1.tolist()
+
+    def save_bertscore_results(self, results: list, file_path="results_multillm.json"):
+        if os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8") as f:
+                old_data = json.load(f)
+        else:
+            old_data = []
+
+        old_data.extend(results)
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(old_data, f, indent=2, ensure_ascii=False)
+        return file_path
+
+    # ----------------------------
+    # Interface principal
+    # ----------------------------
     def prepare_interface(
         self,
         respond,
@@ -45,28 +66,6 @@ class Interface:
         with self.gr.Blocks(
             theme=gr.themes.Soft(),
             title="openCHA",
-            css="""
-                .arena-grid { gap: 12px; }
-                .arena-card {
-                    border: 1px solid rgba(0,0,0,0.08);
-                    border-radius: 14px;
-                    padding: 12px;
-                    background: rgba(255,255,255,0.9);
-                    box-shadow: 0 1px 6px rgba(0,0,0,0.06);
-                    min-height: 420px;
-                }
-                .arena-title {
-                    font-size: 16px;
-                    font-weight: 700;
-                    margin-bottom: 6px;
-                }
-                .arena-answer {
-                    font-size: 14px;
-                    line-height: 1.45;
-                    white-space: pre-wrap;
-                }
-                .small-note { font-size: 12px; opacity: 0.75; }
-            """,
         ) as demo:
 
             gr.Markdown(
@@ -75,12 +74,13 @@ class Interface:
                 **Modos:**
                 - **Chat normal**
                 - **Arena Multi-LLM**
-                - **Benchmark JSON** (upload + escolher quantidade)
+                - **Benchmark JSON**
+                - **Benchmark CSV + BERTScore**
                 """
             )
 
             # =========================
-            # API KEYS (GLOBAL)
+            # API KEYS
             # =========================
             with gr.Accordion("🔑 Configuração de API Keys", open=True):
                 with gr.Row():
@@ -91,7 +91,7 @@ class Interface:
                     deepseek_key = gr.Textbox(label="🟣 DeepSeek API Key", type="password")
 
             # =========================
-            # CONFIG DO AGENTE (GLOBAL)
+            # Config do agente
             # =========================
             with gr.Accordion("⚙️ Configurações do Agente", open=False):
                 with gr.Row():
@@ -103,25 +103,21 @@ class Interface:
             gr.Markdown("---")
 
             with gr.Tabs():
-
-                # =========================================================
+                # =========================
                 # ABA 1: CHAT NORMAL
-                # =========================================================
+                # =========================
                 with gr.Tab("💬 Chat normal"):
                     chatbot = gr.Chatbot(
                         label="Conversa",
                         bubble_full_width=False,
                         height=520,
                         show_copy_button=True,
-                        # Se quiser remover warning no futuro:
-                        # type="messages"
                     )
 
                     with gr.Row():
                         msg_chat = gr.Textbox(
                             placeholder="Digite sua mensagem...",
                             lines=3,
-                            scale=8,
                             show_label=False,
                         )
                         with gr.Column(scale=1, min_width=120):
@@ -137,7 +133,7 @@ class Interface:
 
                     state_chat_history = gr.State([])
 
-                    def render_history(chat_history: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+                    def render_history(chat_history):
                         return [(u, a) for (u, a) in chat_history if a is not None]
 
                     def reset_wrapper_chat():
@@ -149,14 +145,14 @@ class Interface:
                             return [], []
 
                     def respond_chat_wrapper(
-                        msg: str,
-                        openai: str,
-                        serp: str,
-                        gemini: str,
-                        deepseek: str,
-                        chat_hist: List[Tuple[str, str]],
-                        use_hist: bool,
-                        tasks: List[str],
+                        msg,
+                        openai,
+                        serp,
+                        gemini,
+                        deepseek,
+                        chat_hist,
+                        use_hist,
+                        tasks,
                     ):
                         if not msg or not msg.strip():
                             chat_hist.append((msg, "⚠️ Digite uma mensagem."))
@@ -169,9 +165,9 @@ class Interface:
                             empty_msg, updated = respond(
                                 msg, openai, serp, gemini, deepseek,
                                 chat_hist[:-1],
-                                use_hist, tasks,
-                                False,  # use_multi_llm
-                                None
+                                use_hist,
+                                tasks,
+                                False
                             )
                             yield empty_msg, updated
                         except Exception as e:
@@ -205,9 +201,9 @@ class Interface:
                         outputs=[state_chat_history],
                     )
 
-                # =========================================================
-                # ABA 2: MULTI-LLM ARENA (LADO A LADO)
-                # =========================================================
+                # =========================
+                # ABA 2: MULTI-LLM ARENA
+                # =========================
                 with gr.Tab("🏟️ Comparação Multi-LLM"):
                     gr.Markdown("**Escreva um prompt e veja respostas lado a lado.**")
 
@@ -221,7 +217,6 @@ class Interface:
                     btn_send_arena = gr.Button("⚔️ Comparar", variant="primary")
                     arena_status = gr.Markdown()
 
-                    # ✅ lado a lado
                     with gr.Row(equal_height=True, elem_classes="arena-grid"):
                         with gr.Column(scale=1, min_width=320):
                             card_chatgpt = gr.Markdown(elem_classes="arena-card")
@@ -233,12 +228,9 @@ class Interface:
                     def respond_arena(msg, openai, serp, gemini, deepseek, use_hist, tasks, models):
                         if not msg or not msg.strip():
                             return "⚠️ Digite uma mensagem.", "", "", ""
-
                         if not models:
                             return "⚠️ Selecione pelo menos 1 modelo.", "", "", ""
-
                         yield f"⏳ Comparando {', '.join(models)}...", "", "", ""
-
                         _, updated_hist = respond(
                             msg, openai, serp, gemini, deepseek,
                             [],
@@ -246,19 +238,14 @@ class Interface:
                             True,
                             models
                         )
-
                         report_text = ""
                         if updated_hist and updated_hist[-1] and len(updated_hist[-1]) == 2:
                             report_text = updated_hist[-1][1] or ""
-
-                        def pick(model_key: str) -> str:
-                            # relatório geralmente usa CHATGPT/GEMINI/DEEPSEEK
+                        def pick(model_key):
                             return extract_model_response_from_report(report_text, model_key.upper()) or "—"
-
                         out_cg = pick("chatgpt") if "chatgpt" in models else "—"
                         out_gm = pick("gemini") if "gemini" in models else "—"
                         out_ds = pick("deepseek") if "deepseek" in models else "—"
-
                         yield (
                             "✅ Pronto.",
                             f"### ChatGPT\n\n{out_cg}",
@@ -272,15 +259,12 @@ class Interface:
                         outputs=[arena_status, card_chatgpt, card_gemini, card_deepseek],
                     )
 
-                # =========================================================
-                # ABA 3: BENCHMARK JSON (N questões)
-                # =========================================================
+                # =========================
+                # ABA 3: BENCHMARK JSON
+                # =========================
                 with gr.Tab("📁 Benchmark JSON"):
                     gr.Markdown(
-                        """
-                        **Upload de JSON** → escolha **quantidade de questões** → **rodar automático**
-                        (sem selecionar uma a uma)
-                        """
+                        "**Upload de JSON** → escolha **quantidade de questões** → **rodar automático**"
                     )
 
                     file_json = gr.File(label="Envie o JSON", file_types=[".json"], type="binary")
@@ -337,25 +321,19 @@ class Interface:
                             return f"❌ Erro ao carregar JSON: {e}"
 
                     def do_run(file_obj, models, n, rnd, openai, serp, gemini, deepseek, use_hist, tasks):
-                        # garante loader
                         if self._benchmark_loader is None:
                             loader, info = load_dataset_from_gradio_file(file_obj)
                             self._benchmark_loader = loader
                             self._benchmark_info = info
 
-                        # wrapper compatível com engine do benchmark e com assinatura real do respond()
-                        def run_single_question(
-                            question: str,
-                            use_multi_llm: bool = True,
-                            compare_models: Optional[List[str]] = None
-                        ) -> str:
+                        def run_single_question(question, use_multi_llm=True, compare_models=None):
                             _empty, updated_hist = respond(
                                 question,
                                 openai, serp, gemini, deepseek,
-                                [],          # sem histórico no benchmark (evita contaminação)
+                                [],
                                 use_hist,
                                 tasks,
-                                True,        # força multi-llm
+                                True,
                                 compare_models,
                             )
                             if updated_hist and updated_hist[-1] and len(updated_hist[-1]) == 2:
@@ -370,17 +348,15 @@ class Interface:
                             show_per_question=True,
                         )
 
-                        # tabela com colunas ok_* quando dataset_type == closed
                         evaluator = BenchmarkEvaluator()
-
-                        def ok_flag(dataset_type: str, expected: Any, answer: str) -> str:
+                        def ok_flag(dataset_type, expected, answer):
                             if (dataset_type or "").lower().strip() != "closed":
                                 return ""
                             exp = str(expected).strip().lower()
                             pred = evaluator.extract_answer(answer)
                             return "✅" if pred == exp else "❌"
 
-                        table_rows: List[List[str]] = []
+                        table_rows = []
                         for r in rows:
                             ds_type = str(r.get("dataset_type", ""))
                             expected = r.get("expected", "")
@@ -413,9 +389,59 @@ class Interface:
                         outputs=[bench_report, bench_table],
                     )
 
-            demo.launch(
-                share=share,
-                server_port=server_port,
-                server_name="0.0.0.0",
-                show_error=True,
-            )
+                # =========================
+                # ABA 4: BENCHMARK CSV + BERTSCORE
+                # =========================
+                with gr.Tab("📁 Benchmark CSV + BERTScore"):
+                    gr.Markdown("**Upload CSV → calcula P/R/F1 para múltiplos modelos (apenas primeira pergunta)**")
+
+                    file_csv = gr.File(label="Envie CSV", file_types=[".csv"], type="filepath")
+                    models_select = gr.CheckboxGroup(
+                        label="Selecione modelos",
+                        choices=["chatgpt","gemini","deepseek"],
+                        value=["chatgpt","gemini","deepseek"]
+                    )
+                    btn_run_csv = gr.Button("🚀 Rodar Benchmark")
+                    csv_status = gr.Markdown()
+
+                    def run_csv(file_obj, selected_models, openai, serp, gemini, deepseek):
+                        df = pd.read_csv(file_obj.name)
+                        df_first = df.iloc[:1]
+                        questions = df_first['Pergunta'].tolist()
+                        references = df_first['Resposta'].tolist()
+                        results_list = []
+
+                        for i, query in enumerate(questions):
+                            _, updated_hist = respond(
+                                query, openai, serp, gemini, deepseek,
+                                [], True, [], True, selected_models
+                            )
+
+                            for model in selected_models:
+                                response = updated_hist[-1][1] if updated_hist else ""
+                                P,R,F1 = self.compute_bertscore([response], [references[i]])
+                                results_list.append({
+                                    "timestamp": datetime.now().isoformat(),
+                                    "pergunta": query,
+                                    "modelo": model,
+                                    "resposta": response,
+                                    "P": P[0],
+                                    "R": R[0],
+                                    "F1": F1[0]
+                                })
+
+                        self.save_bertscore_results(results_list)
+                        return f"✅ Benchmark concluído! Resultados salvos em 'results_multillm.json'."
+
+                    btn_run_csv.click(
+                        fn=run_csv,
+                        inputs=[file_csv, models_select, openai_key, serp_key, gemini_key, deepseek_key],
+                        outputs=[csv_status]
+                    )
+
+        demo.launch(
+            share=share,
+            server_port=server_port,
+            server_name="0.0.0.0",
+            show_error=True,
+        )
