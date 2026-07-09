@@ -3,7 +3,7 @@ import pandas as pd
 # Define o caminho do arquivo CSV que será validado.
 # Por enquanto, estamos usando o caminho local do projeto.
 #file_path = "/home/laiana/Documentos/Healthchat/src/openCHA/datasets/corpus_perguntas_respostas.csv"
-file_path = "/home/laiana/Documentos/Healthchat/src/openCHA/datasets/corpus_perguntas_respostasv2.csv"
+file_path = "/home/laiana/Documentos/Healthchat/src/openCHA/datasets/corpus_perguntas_respostas.csv"
 
 # Cria uma função responsável por validar os dados de um arquivo CSV.
 # O parâmetro file_path representa o caminho do arquivo que será lido.
