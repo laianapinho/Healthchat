@@ -2,8 +2,6 @@
 """
 LLM Judge: Avaliação automática de respostas usando outro LLM como juiz.
 
-Baseado em: G-EVAL: NLG Evaluation using GPT-4 with Better Human Alignment
-
 Combina DUAS técnicas do artigo original:
     1. Chain-of-Thought (CoT)  → o juiz escreve uma análise crítica ANTES
                                   de dar a nota, reduzindo notas infladas.
@@ -35,6 +33,14 @@ salvos no resultado e persistidos em results_llmjudge.json:
 Isso permite auditar depois, lendo o JSON, exatamente por que o juiz deu
 determinada nota e quão confiante ele estava — sem poluir o terminal
 durante a execução.
+
+PERSISTÊNCIA (JSON gerado nos 3 fluxos):
+Antes, apenas o benchmark via CSV (geval_csv) salvava resultados em disco.
+Agora as três funções persistem seus resultados, cada uma em seu próprio
+arquivo, para não misturar contextos diferentes de avaliação:
+    - geval_chat  → results_llmjudge_chat.json
+    - geval_arena → results_llmjudge_arena.json
+    - geval_csv   → results_llmjudge_csv.json  (nome mantido por padrão)
 
 Contém:
   - LLMJudgeEvaluator : classe principal
@@ -514,7 +520,7 @@ class LLMJudgeEvaluator:
 
 
 # =============================================================================
-# 4) FUNÇÕES PRONTAS PARA O GRADIO  (sem mudanças na assinatura)
+# 4) FUNÇÕES PRONTAS PARA O GRADIO  (agora com persistência nos 3 fluxos)
 # =============================================================================
 
 def geval_chat(
@@ -543,11 +549,16 @@ def geval_chat(
         pergunta=pergunta, resposta=resposta,
         modelo="chat", referencia=referencia)
 
+    # ── persistência: salva também a avaliação feita no chat normal ──
+    # arquivo separado do benchmark CSV para não misturar contextos
+    saved_path = LLMJudgeEvaluator.save(
+        [record], file_path="results_llmjudge_chat.json")
+
     modo  = "com gabarito" if referencia else "sem gabarito"
     rows  = [[c, record.get(c, 0), record.get(f"{c}_analise", "")[:100]] for c in criteria]
     media = record.get("media", 0)
     rows.append(["**MÉDIA**", media, ""])
-    return rows, f"✅ Média: **{media:.2f} / 5.0** ({modo})"
+    return rows, f"✅ Média: **{media:.2f} / 5.0** ({modo}) — salvo em `{saved_path}`"
 
 
 def geval_arena(
@@ -567,12 +578,14 @@ def geval_arena(
     referencia = gabarito.strip() if gabarito and gabarito.strip() else None
     evaluator  = LLMJudgeEvaluator(api_key=openai_key, criteria=criteria)
     rows       = []
+    records    = []  # ── acumula os registros completos para salvar depois ──
 
     for model in models:
         resp   = responses.get(model, "")
         record = evaluator.evaluate(
             pergunta=pergunta, resposta=resp,
             modelo=model, referencia=referencia)
+        records.append(record)
         rows.append([
             model,
             record.get("corretude",    0),
@@ -584,6 +597,11 @@ def geval_arena(
             record.get("aderencia",    0),
             record.get("media",        0),
         ])
+
+    # ── persistência: salva todas as avaliações desta rodada da arena ──
+    # arquivo separado do chat e do benchmark CSV para não misturar contextos
+    if records:
+        LLMJudgeEvaluator.save(records, file_path="results_llmjudge_arena.json")
 
     return rows, gr.update(visible=True)
 
@@ -666,6 +684,6 @@ def geval_csv(
                 record.get("media",        0),
             ])
 
-    saved_path = LLMJudgeEvaluator.save(records)
+    saved_path = LLMJudgeEvaluator.save(records, file_path="results_llmjudge_csv.json")
     summary    = LLMJudgeEvaluator.summarize(records, selected_models, n)
     return f"{summary}\n\n✅ Resultados salvos em `{saved_path}`.", table_rows
