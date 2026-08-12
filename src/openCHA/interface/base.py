@@ -11,6 +11,7 @@ from openCHA.benchmark_ui_helpers import (
 )
 from openCHA.benchmark_evaluator import BenchmarkEvaluator
 from openCHA.bertscore_evaluator import BertScoreEvaluator
+from openCHA.dataset_tools.csv_column_detector import detect_csv_qa_columns
 from openCHA.llmjudge import (
     LLMJudgeEvaluator,
     geval_chat,
@@ -482,8 +483,10 @@ class Interface:
                 # ── ABA 4: BENCHMARK CSV + BERTSCORE ─────────────────────────
                 with gr.Tab("📊 BERTScore — CSV"):
                     gr.Markdown(
-                        "Envie o CSV com colunas `Pergunta` e `Resposta`, "
-                        "selecione os modelos e calcule P/R/F1 automaticamente.")
+                        "Envie o CSV com colunas de pergunta e resposta "
+                        "(ex: `Pergunta`/`Resposta`, `question`/`answer`, etc. — "
+                        "detectadas automaticamente), selecione os modelos e "
+                        "calcule P/R/F1 automaticamente.")
 
                     with gr.Row():
                         file_csv = gr.File(
@@ -519,15 +522,19 @@ class Interface:
                             df = pd.read_csv(file_path)
                         except Exception as e:
                             return f"❌ Erro ao ler CSV: {e}", []
-                        if not {"Pergunta","Resposta"}.issubset(df.columns):
-                            return "❌ CSV deve conter as colunas 'Pergunta' e 'Resposta'.", []
+
+                        # ── detecção automática das colunas de pergunta/resposta ──
+                        try:
+                            question_col, answer_col, _ = detect_csv_qa_columns(df)
+                        except ValueError as e:
+                            return f"❌ {e}", []
 
                         n  = min(int(n_samples), len(df))
                         df = df.sample(n=n, random_state=42).reset_index(drop=True) \
                              if use_random else df.head(n)
 
-                        questions  = df["Pergunta"].tolist()
-                        references = df["Resposta"].tolist()
+                        questions  = df[question_col].tolist()
+                        references = df[answer_col].tolist()
                         records, table_rows = [], []
 
                         for i, query in enumerate(questions):
@@ -707,7 +714,8 @@ class Interface:
                 with gr.Tab("🏛️ G-EVAL (LLM Juiz)"):
                     gr.Markdown(
                         "Avalia as respostas dos modelos com um LLM como juiz.\n\n"
-                        "CSV deve ter colunas `Pergunta` e `Resposta` (gabarito).")
+                        "As colunas de pergunta e resposta (gabarito) do CSV são "
+                        "detectadas automaticamente.")
 
                     with gr.Row():
                         geval_file_csv = gr.File(

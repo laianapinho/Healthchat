@@ -61,6 +61,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import openai
 import pandas as pd
 
+from openCHA.dataset_tools.csv_column_detector import detect_csv_qa_columns
+
 logger = logging.getLogger(__name__)
 
 
@@ -622,7 +624,8 @@ def geval_csv(
     respond_fn,
     extract_fn,
 ) -> Tuple[str, List]:
-    """Roda benchmark LLM Judge em um CSV com colunas Pergunta/Resposta."""
+    """Roda benchmark LLM Judge em um CSV, detectando automaticamente
+    as colunas de pergunta e resposta (gabarito)."""
     if file_path is None:
         return "❌ Nenhum arquivo enviado.", []
     if not selected_models:
@@ -637,15 +640,18 @@ def geval_csv(
     except Exception as e:
         return f"❌ Erro ao ler CSV: {e}", []
 
-    if not {"Pergunta","Resposta"}.issubset(df.columns):
-        return "❌ CSV deve conter as colunas 'Pergunta' e 'Resposta'.", []
+    # ── detecção automática das colunas de pergunta/resposta ──
+    try:
+        question_col, answer_col, _ = detect_csv_qa_columns(df)
+    except ValueError as e:
+        return f"❌ {e}", []
 
     n  = min(int(n_samples), len(df))
     df = df.sample(n=n, random_state=42).reset_index(drop=True) \
          if use_random else df.head(n)
 
-    questions  = df["Pergunta"].tolist()
-    references = df["Resposta"].tolist()
+    questions  = df[question_col].tolist()
+    references = df[answer_col].tolist()
 
     evaluator = LLMJudgeEvaluator(
         api_key=openai_key, model=judge_model, criteria=selected_criteria)
