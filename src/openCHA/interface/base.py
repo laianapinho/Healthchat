@@ -11,6 +11,8 @@ from openCHA.benchmark_ui_helpers import (
 )
 from openCHA.benchmark_evaluator import BenchmarkEvaluator
 from openCHA.bertscore_evaluator import BertScoreEvaluator
+from openCHA.bertscore_biobert_evaluator import BioBertScoreEvaluator
+from openCHA.bertscore_pubmedbert_evaluator import PubMedBertScoreEvaluator
 from openCHA.dataset_tools.csv_column_detector import detect_csv_qa_columns
 from openCHA.llmjudge import (
     LLMJudgeEvaluator,
@@ -20,6 +22,11 @@ from openCHA.llmjudge import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── Critérios do G-EVAL ───────────────────────────────────────────────────────
+# Devem ser exatamente as mesmas chaves de CRITERIA em openCHA/llmjudge.py.
+# Se mudar lá, mude aqui (e os headers das tabelas abaixo).
+GEVAL_CRITERIA = ["corretude", "completude", "seguranca", "clareza", "relevancia"]
 
 # ── Design tokens ─────────────────────────────────────────────────────────────
 _CSS = """
@@ -148,13 +155,15 @@ body, .gradio-container {
 
 class Interface:
     """
-    Gradio UI com 6 abas:
+    Gradio UI com 8 abas:
       1) Chat normal
       2) Comparação Multi-LLM (Arena)
       3) Benchmark JSON
-      4) Benchmark CSV + BERTScore
-      5) BERTScore Manual          ← NOVA
-      6) G-EVAL (LLM Juiz)
+      4) BERTScore — CSV
+      5) BioBERTScore — CSV
+      6) BERTScore — Manual
+      7) G-EVAL (LLM Juiz)
+      8) PubMedBERTScore — CSV
     """
 
     def __init__(self):
@@ -162,6 +171,8 @@ class Interface:
         self._benchmark_loader = None
         self._benchmark_info   = None
         self._bs_evaluator     = BertScoreEvaluator(lang="pt", batch_size=16)
+        self._bb_evaluator     = BioBertScoreEvaluator(batch_size=16)
+        self._pmb_evaluator    = PubMedBertScoreEvaluator(batch_size=16)
         logger.info("Interface inicializada")
 
     def prepare_interface(
@@ -187,7 +198,7 @@ class Interface:
             gr.HTML("""
             <div class="app-header">
                 <h1>🔷 HealthChat · openCHA</h1>
-                <p>Chat · Arena Multi-LLM · Benchmark JSON · BERTScore CSV · BERTScore Manual · G-EVAL</p>
+                <p>Chat · Arena Multi-LLM · Benchmark JSON · BERTScore · BioBERTScore · PubMedBERTScore · G-EVAL</p>
             </div>
             """)
 
@@ -239,17 +250,18 @@ class Interface:
                         with gr.Row():
                             chat_geval_criteria = gr.CheckboxGroup(
                                 label="Critérios",
-                                choices=["corretude","completude","coerencia",
-                                         "consistencia","fluencia","seguranca","aderencia"],
-                                value=["corretude","completude","coerencia",
-                                       "consistencia","fluencia","seguranca","aderencia"],
+                                choices=GEVAL_CRITERIA,
+                                value=GEVAL_CRITERIA,
                                 scale=2)
                             btn_geval_chat = gr.Button(
                                 "⚖️ Avaliar", variant="secondary", scale=1)
+                        # geval_chat devolve linhas [critério, nota, análise]
+                        # (5 critérios + 1 linha de MÉDIA = 6 linhas)
                         chat_geval_result = gr.Dataframe(
-                            headers=["criterio","nota"],
-                            datatype=["str","number"],
-                            row_count=7, col_count=(2,"fixed"),
+                            headers=["criterio","nota","analise"],
+                            datatype=["str","number","str"],
+                            row_count=6, col_count=(3,"fixed"),
+                            wrap=True,
                             label="Notas G-EVAL")
                         chat_geval_status = gr.Markdown()
 
@@ -323,10 +335,8 @@ class Interface:
                             lines=2)
                         arena_geval_criteria = gr.CheckboxGroup(
                             label="Critérios",
-                            choices=["corretude","completude","coerencia",
-                                     "consistencia","fluencia","seguranca","aderencia"],
-                            value=["corretude","completude","coerencia",
-                                   "consistencia","fluencia","seguranca","aderencia"])
+                            choices=GEVAL_CRITERIA,
+                            value=GEVAL_CRITERIA)
 
                     btn_send_arena = gr.Button("⚔️ Comparar modelos", variant="primary")
                     arena_status   = gr.Markdown()
@@ -336,21 +346,24 @@ class Interface:
                         card_gemini   = gr.Markdown(elem_classes="model-card")
                         card_deepseek = gr.Markdown(elem_classes="model-card")
 
+                    # geval_arena devolve: modelo + 5 critérios + média = 7 colunas
                     arena_geval_table = gr.Dataframe(
-                        headers=["modelo","corretude","completude","coerencia",
-                                 "consistencia","fluencia","seguranca","aderencia","média"],
-                        datatype=["str","number","number","number",
-                                  "number","number","number","number","number"],
-                        row_count=3, col_count=(9,"fixed"),
+                        headers=["modelo"] + GEVAL_CRITERIA + ["média"],
+                        datatype=["str"] + ["number"] * 6,
+                        row_count=3, col_count=(7,"fixed"),
                         label="G-EVAL — Comparação entre modelos",
                         visible=False)
 
                     def respond_arena(msg, gabarito, criteria, openai, serp, gemini,
                                       deepseek, use_hist, tasks, models):
+                        # IMPORTANTE: esta função é um generator (usa yield), então
+                        # "return valor" não envia nada à interface. Use yield + return.
                         if not msg or not msg.strip():
-                            return "⚠️ Digite uma mensagem.", "", "", "", gr.update(visible=False), []
+                            yield "⚠️ Digite uma mensagem.", "", "", "", gr.update(visible=False), []
+                            return
                         if not models:
-                            return "⚠️ Selecione pelo menos 1 modelo.", "", "", "", gr.update(visible=False), []
+                            yield "⚠️ Selecione pelo menos 1 modelo.", "", "", "", gr.update(visible=False), []
+                            return
                         yield f"⏳ Comparando {', '.join(models)}...", "", "", "", gr.update(visible=False), []
                         _, updated_hist = respond(msg, openai, serp, gemini, deepseek,
                                                   [], use_hist, tasks, True, models)
@@ -576,7 +589,104 @@ class Interface:
                                 use_history, tasks_selector],
                         outputs=[csv_status, csv_table])
 
-                # ── ABA 5: BERTSCORE MANUAL (NOVA) ────────────────────────────
+                # ── ABA 4.1: BENCHMARK CSV + BIOBERTSCORE ────────────────────
+                with gr.Tab("🧬 BioBERTScore — CSV"):
+                    gr.Markdown(
+                        "Mesmo fluxo do BERTScore, mas usando o **BioBERT** "
+                        "(`dmis-lab/biobert-base-cased-v1.2`) como modelo de "
+                        "embeddings — recomendado para o conjunto em **inglês** "
+                        "(MedDataProcessed). Envie o CSV com colunas de pergunta "
+                        "e resposta, selecione os modelos e calcule P/R/F1.")
+
+                    with gr.Row():
+                        file_csv_bb = gr.File(
+                            label="Arquivo CSV",
+                            file_types=[".csv"], type="filepath", scale=2)
+                        models_select_bb = gr.CheckboxGroup(
+                            label="Modelos",
+                            choices=["chatgpt","gemini","deepseek"],
+                            value=["chatgpt","gemini","deepseek"], scale=1)
+
+                    with gr.Row():
+                        csv_num_samples_bb = gr.Slider(
+                            minimum=1, maximum=500, value=1, step=1,
+                            label="Quantidade de questões", scale=2)
+                        csv_random_bb = gr.Checkbox(
+                            label="🎲 Seleção aleatória", value=False, scale=1)
+
+                    btn_run_csv_bb = gr.Button("🧬 Rodar Benchmark (BioBERT)", variant="primary")
+                    csv_status_bb  = gr.Markdown()
+                    csv_table_bb   = gr.Dataframe(
+                        headers=["pergunta","modelo","resposta","P","R","F1"],
+                        datatype=["str","str","str","number","number","number"],
+                        row_count=5, col_count=(6,"fixed"), wrap=True,
+                        label="Resultados BioBERTScore")
+
+                    def run_csv_benchmark_biobert(file_path, selected_models, n_samples, use_random,
+                                                  openai, serp, gemini, deepseek, use_hist, tasks):
+                        if file_path is None:
+                            return "❌ Nenhum arquivo enviado.", []
+                        if not selected_models:
+                            return "❌ Selecione pelo menos 1 modelo.", []
+                        try:
+                            df = pd.read_csv(file_path)
+                        except Exception as e:
+                            return f"❌ Erro ao ler CSV: {e}", []
+
+                        # ── detecção automática das colunas de pergunta/resposta ──
+                        try:
+                            question_col, answer_col, _ = detect_csv_qa_columns(df)
+                        except ValueError as e:
+                            return f"❌ {e}", []
+
+                        n  = min(int(n_samples), len(df))
+                        df = df.sample(n=n, random_state=42).reset_index(drop=True) \
+                             if use_random else df.head(n)
+
+                        questions  = df[question_col].tolist()
+                        references = df[answer_col].tolist()
+                        records, table_rows = [], []
+
+                        for i, query in enumerate(questions):
+                            try:
+                                _, updated_hist = respond(
+                                    query, openai, serp, gemini, deepseek,
+                                    [], use_hist, tasks, True, selected_models)
+                                report_text = ""
+                                if updated_hist and updated_hist[-1] and \
+                                        len(updated_hist[-1]) == 2:
+                                    report_text = updated_hist[-1][1] or ""
+                            except Exception as e:
+                                logger.error(f"Erro na questão {i}: {e}", exc_info=True)
+                                report_text = ""
+
+                            for model in selected_models:
+                                model_response = extract_model_response_from_report(
+                                    report_text, model.upper()) or ""
+                                record = self._bb_evaluator.build_record(
+                                    pergunta=query,
+                                    modelo=model,
+                                    resposta=model_response,
+                                    reference=references[i],
+                                )
+                                records.append(record)
+                                table_rows.append([
+                                    query, model, model_response,
+                                    record["P"], record["R"], record["F1"],
+                                ])
+
+                        saved_path = BioBertScoreEvaluator.save(records)
+                        summary    = self._bb_evaluator.summarize(records, selected_models, n)
+                        return f"{summary}\n\n✅ Resultados salvos em `{saved_path}`.", table_rows
+
+                    btn_run_csv_bb.click(
+                        fn=run_csv_benchmark_biobert,
+                        inputs=[file_csv_bb, models_select_bb, csv_num_samples_bb, csv_random_bb,
+                                openai_key, serp_key, gemini_key, deepseek_key,
+                                use_history, tasks_selector],
+                        outputs=[csv_status_bb, csv_table_bb])
+
+                # ── ABA 5: BERTSCORE MANUAL ───────────────────────────────────
                 with gr.Tab("🎯 BERTScore — Manual"):
                     gr.Markdown(
                         "Digite a pergunta, a resposta de referência e compare "
@@ -710,10 +820,12 @@ class Interface:
                             manual_resp_chatgpt, manual_resp_gemini, manual_resp_deepseek,
                         ])
 
-                # ── ABA 6: G-EVAL ─────────────────────────────────────────────
+                # ── ABA 6: G-EVAL (LLM JUIZ) ──────────────────────────────────
                 with gr.Tab("🏛️ G-EVAL (LLM Juiz)"):
                     gr.Markdown(
-                        "Avalia as respostas dos modelos com um LLM como juiz.\n\n"
+                        "Avalia as respostas dos modelos com um LLM como juiz, "
+                        "usando 5 critérios: **corretude, completude, segurança, "
+                        "clareza e relevância**.\n\n"
                         "As colunas de pergunta e resposta (gabarito) do CSV são "
                         "detectadas automaticamente.")
 
@@ -740,20 +852,17 @@ class Interface:
                             value="gpt-4o-mini", scale=1)
                         geval_criteria = gr.CheckboxGroup(
                             label="Critérios",
-                            choices=["corretude","completude","coerencia",
-                                     "consistencia","fluencia","seguranca","aderencia"],
-                            value=["corretude","completude","coerencia",
-                                   "consistencia","fluencia","seguranca","aderencia"],
+                            choices=GEVAL_CRITERIA,
+                            value=GEVAL_CRITERIA,
                             scale=2)
 
                     btn_run_geval = gr.Button("⚖️ Avaliar com G-EVAL", variant="primary")
                     geval_status  = gr.Markdown()
+                    # geval_csv devolve: pergunta, modelo + 5 critérios + média = 8 colunas
                     geval_table   = gr.Dataframe(
-                        headers=["pergunta","modelo","corretude","completude","coerencia",
-                                 "consistencia","fluencia","seguranca","aderencia","media"],
-                        datatype=["str","str","number","number","number",
-                                  "number","number","number","number","number"],
-                        row_count=5, col_count=(10,"fixed"), wrap=True,
+                        headers=["pergunta","modelo"] + GEVAL_CRITERIA + ["media"],
+                        datatype=["str","str"] + ["number"] * 6,
+                        row_count=5, col_count=(8,"fixed"), wrap=True,
                         label="Resultados G-EVAL")
 
                     def run_geval_benchmark(
@@ -783,6 +892,103 @@ class Interface:
                             use_history, tasks_selector,
                         ],
                         outputs=[geval_status, geval_table])
+
+                # ── ABA 7: BENCHMARK CSV + PUBMEDBERTSCORE ───────────────────
+                with gr.Tab("🧬 PubMedBERTScore — CSV"):
+                    gr.Markdown(
+                        "Mesmo fluxo do BERTScore, mas usando o **PubMedBERT** "
+                        "(`microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext`) "
+                        "como modelo de embeddings — recomendado para o conjunto em "
+                        "**inglês** (MedDataProcessed). Envie o CSV com colunas de "
+                        "pergunta e resposta, selecione os modelos e calcule P/R/F1.")
+
+                    with gr.Row():
+                        file_csv_pmb = gr.File(
+                            label="Arquivo CSV",
+                            file_types=[".csv"], type="filepath", scale=2)
+                        models_select_pmb = gr.CheckboxGroup(
+                            label="Modelos",
+                            choices=["chatgpt","gemini","deepseek"],
+                            value=["chatgpt","gemini","deepseek"], scale=1)
+
+                    with gr.Row():
+                        csv_num_samples_pmb = gr.Slider(
+                            minimum=1, maximum=500, value=1, step=1,
+                            label="Quantidade de questões", scale=2)
+                        csv_random_pmb = gr.Checkbox(
+                            label="🎲 Seleção aleatória", value=False, scale=1)
+
+                    btn_run_csv_pmb = gr.Button("🧬 Rodar Benchmark (PubMedBERT)", variant="primary")
+                    csv_status_pmb  = gr.Markdown()
+                    csv_table_pmb   = gr.Dataframe(
+                        headers=["pergunta","modelo","resposta","P","R","F1"],
+                        datatype=["str","str","str","number","number","number"],
+                        row_count=5, col_count=(6,"fixed"), wrap=True,
+                        label="Resultados PubMedBERTScore")
+
+                    def run_csv_benchmark_pubmedbert(file_path, selected_models, n_samples, use_random,
+                                                     openai, serp, gemini, deepseek, use_hist, tasks):
+                        if file_path is None:
+                            return "❌ Nenhum arquivo enviado.", []
+                        if not selected_models:
+                            return "❌ Selecione pelo menos 1 modelo.", []
+                        try:
+                            df = pd.read_csv(file_path)
+                        except Exception as e:
+                            return f"❌ Erro ao ler CSV: {e}", []
+
+                        # ── detecção automática das colunas de pergunta/resposta ──
+                        try:
+                            question_col, answer_col, _ = detect_csv_qa_columns(df)
+                        except ValueError as e:
+                            return f"❌ {e}", []
+
+                        n  = min(int(n_samples), len(df))
+                        df = df.sample(n=n, random_state=42).reset_index(drop=True) \
+                             if use_random else df.head(n)
+
+                        questions  = df[question_col].tolist()
+                        references = df[answer_col].tolist()
+                        records, table_rows = [], []
+
+                        for i, query in enumerate(questions):
+                            try:
+                                _, updated_hist = respond(
+                                    query, openai, serp, gemini, deepseek,
+                                    [], use_hist, tasks, True, selected_models)
+                                report_text = ""
+                                if updated_hist and updated_hist[-1] and \
+                                        len(updated_hist[-1]) == 2:
+                                    report_text = updated_hist[-1][1] or ""
+                            except Exception as e:
+                                logger.error(f"Erro na questão {i}: {e}", exc_info=True)
+                                report_text = ""
+
+                            for model in selected_models:
+                                model_response = extract_model_response_from_report(
+                                    report_text, model.upper()) or ""
+                                record = self._pmb_evaluator.build_record(
+                                    pergunta=query,
+                                    modelo=model,
+                                    resposta=model_response,
+                                    reference=references[i],
+                                )
+                                records.append(record)
+                                table_rows.append([
+                                    query, model, model_response,
+                                    record["P"], record["R"], record["F1"],
+                                ])
+
+                        saved_path = PubMedBertScoreEvaluator.save(records)
+                        summary    = self._pmb_evaluator.summarize(records, selected_models, n)
+                        return f"{summary}\n\n✅ Resultados salvos em `{saved_path}`.", table_rows
+
+                    btn_run_csv_pmb.click(
+                        fn=run_csv_benchmark_pubmedbert,
+                        inputs=[file_csv_pmb, models_select_pmb, csv_num_samples_pmb, csv_random_pmb,
+                                openai_key, serp_key, gemini_key, deepseek_key,
+                                use_history, tasks_selector],
+                        outputs=[csv_status_pmb, csv_table_pmb])
 
             demo.launch(
                 share=share,

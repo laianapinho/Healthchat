@@ -7,6 +7,9 @@ com cálculo de precisão, recall e F1
 from openCHA.main import openCHA
 from openCHA.interface.healthchat_bertscore_multillm_interface import launch_multillm_interface
 
+import logging
+logging.basicConfig(level=logging.INFO)
+
 def main():
     print("🔷 openCHA + Multi-LLM + BERTScore")
     print("=" * 50)
