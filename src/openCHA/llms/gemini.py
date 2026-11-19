@@ -42,7 +42,7 @@ class GeminiLLM(BaseLLM):
     """
 
     models: Dict[str, int] = {
-        "gemini-2.5-flash-lite": 512,          # Modelo lite rápido
+        "gemini-3.5-flash-lite": 512,          # Modelo lite rápido
     }
 
     llm_module: Any = Field(default=None, exclude=True)
@@ -51,7 +51,7 @@ class GeminiLLM(BaseLLM):
     temperature: float = 0.7
     top_p: float = 1.0
     top_k: Optional[int] = None
-    default_model: str = "gemini-2.5-flash-lite"
+    default_model: str = "gemini-3.5-flash-lite"
 
     @model_validator(mode="before")
     def validate_environment(cls, values: Dict) -> Dict:

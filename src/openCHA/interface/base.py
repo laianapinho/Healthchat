@@ -14,6 +14,7 @@ from openCHA.bertscore_evaluator import BertScoreEvaluator
 from openCHA.bertscore_biobert_evaluator import BioBertScoreEvaluator
 from openCHA.bertscore_pubmedbert_evaluator import PubMedBertScoreEvaluator
 from openCHA.dataset_tools.csv_column_detector import detect_csv_qa_columns
+from openCHA.dataset_tools.csv_eval_runner import run_csv_eval
 from openCHA.llmjudge import (
     LLMJudgeEvaluator,
     geval_chat,
@@ -159,11 +160,11 @@ class Interface:
       1) Chat normal
       2) Comparação Multi-LLM (Arena)
       3) Benchmark JSON
-      4) BERTScore — CSV
-      5) BioBERTScore — CSV
+      4) BERTScore — CSV            (português)
+      5) BioBERTScore — CSV         (inglês)
       6) BERTScore — Manual
       7) G-EVAL (LLM Juiz)
-      8) PubMedBERTScore — CSV
+      8) PubMedBERTScore — CSV      (inglês)
     """
 
     def __init__(self):
@@ -493,13 +494,13 @@ class Interface:
                                 use_history, tasks_selector],
                         outputs=[bench_report, bench_table])
 
-                # ── ABA 4: BENCHMARK CSV + BERTSCORE ─────────────────────────
+                # ── ABA 4: BENCHMARK CSV + BERTSCORE (PORTUGUÊS) ──────────────
                 with gr.Tab("📊 BERTScore — CSV"):
                     gr.Markdown(
-                        "Envie o CSV com colunas de pergunta e resposta "
-                        "(ex: `Pergunta`/`Resposta`, `question`/`answer`, etc. — "
-                        "detectadas automaticamente), selecione os modelos e "
-                        "calcule P/R/F1 automaticamente.")
+                        "Avaliação em **português**. O CSV pode ser: "
+                        "**PubMedQA** (`question_pt`, `context_pt`, `long_answer_pt`, `final_decision`), "
+                        "**LiveQA/MedQuAD** (`question_pt`, `answer_pt`) ou **MedPT** "
+                        "(`question`, `answer`). Selecione os modelos e calcule P/R/F1.")
 
                     with gr.Row():
                         file_csv = gr.File(
@@ -527,60 +528,13 @@ class Interface:
 
                     def run_csv_benchmark(file_path, selected_models, n_samples, use_random,
                                           openai, serp, gemini, deepseek, use_hist, tasks):
-                        if file_path is None:
-                            return "❌ Nenhum arquivo enviado.", []
-                        if not selected_models:
-                            return "❌ Selecione pelo menos 1 modelo.", []
-                        try:
-                            df = pd.read_csv(file_path)
-                        except Exception as e:
-                            return f"❌ Erro ao ler CSV: {e}", []
-
-                        # ── detecção automática das colunas de pergunta/resposta ──
-                        try:
-                            question_col, answer_col, _ = detect_csv_qa_columns(df)
-                        except ValueError as e:
-                            return f"❌ {e}", []
-
-                        n  = min(int(n_samples), len(df))
-                        df = df.sample(n=n, random_state=42).reset_index(drop=True) \
-                             if use_random else df.head(n)
-
-                        questions  = df[question_col].tolist()
-                        references = df[answer_col].tolist()
-                        records, table_rows = [], []
-
-                        for i, query in enumerate(questions):
-                            try:
-                                _, updated_hist = respond(
-                                    query, openai, serp, gemini, deepseek,
-                                    [], use_hist, tasks, True, selected_models)
-                                report_text = ""
-                                if updated_hist and updated_hist[-1] and \
-                                        len(updated_hist[-1]) == 2:
-                                    report_text = updated_hist[-1][1] or ""
-                            except Exception as e:
-                                logger.error(f"Erro na questão {i}: {e}", exc_info=True)
-                                report_text = ""
-
-                            for model in selected_models:
-                                model_response = extract_model_response_from_report(
-                                    report_text, model.upper()) or ""
-                                record = self._bs_evaluator.build_record(
-                                    pergunta=query,
-                                    modelo=model,
-                                    resposta=model_response,
-                                    reference=references[i],
-                                )
-                                records.append(record)
-                                table_rows.append([
-                                    query, model, model_response,
-                                    record["P"], record["R"], record["F1"],
-                                ])
-
-                        saved_path = BertScoreEvaluator.save(records)
-                        summary    = self._bs_evaluator.summarize(records, selected_models, n)
-                        return f"{summary}\n\n✅ Resultados salvos em `{saved_path}`.", table_rows
+                        return run_csv_eval(
+                            file_path, selected_models, n_samples, use_random,
+                            openai, serp, gemini, deepseek, use_hist, tasks,
+                            respond=respond,
+                            extract_fn=extract_model_response_from_report,
+                            evaluator=self._bs_evaluator,
+                            lang="pt")
 
                     btn_run_csv.click(
                         fn=run_csv_benchmark,
@@ -589,14 +543,14 @@ class Interface:
                                 use_history, tasks_selector],
                         outputs=[csv_status, csv_table])
 
-                # ── ABA 4.1: BENCHMARK CSV + BIOBERTSCORE ────────────────────
+                # ── ABA 4.1: BENCHMARK CSV + BIOBERTSCORE (INGLÊS) ───────────
                 with gr.Tab("🧬 BioBERTScore — CSV"):
                     gr.Markdown(
-                        "Mesmo fluxo do BERTScore, mas usando o **BioBERT** "
-                        "(`dmis-lab/biobert-base-cased-v1.2`) como modelo de "
-                        "embeddings — recomendado para o conjunto em **inglês** "
-                        "(MedDataProcessed). Envie o CSV com colunas de pergunta "
-                        "e resposta, selecione os modelos e calcule P/R/F1.")
+                        "Mesmo fluxo do BERTScore, mas em **inglês** e usando o **BioBERT** "
+                        "(`dmis-lab/biobert-base-cased-v1.2`) como modelo de embeddings. "
+                        "O CSV pode ser: **PubMedQA** (`question`, `context`, `long_answer`, "
+                        "`final_decision`), **LiveQA/MedQuAD** (`question`, `answer`) ou "
+                        "**MedPT traduzido** (`question_en`, `answer_en`).")
 
                     with gr.Row():
                         file_csv_bb = gr.File(
@@ -624,60 +578,13 @@ class Interface:
 
                     def run_csv_benchmark_biobert(file_path, selected_models, n_samples, use_random,
                                                   openai, serp, gemini, deepseek, use_hist, tasks):
-                        if file_path is None:
-                            return "❌ Nenhum arquivo enviado.", []
-                        if not selected_models:
-                            return "❌ Selecione pelo menos 1 modelo.", []
-                        try:
-                            df = pd.read_csv(file_path)
-                        except Exception as e:
-                            return f"❌ Erro ao ler CSV: {e}", []
-
-                        # ── detecção automática das colunas de pergunta/resposta ──
-                        try:
-                            question_col, answer_col, _ = detect_csv_qa_columns(df)
-                        except ValueError as e:
-                            return f"❌ {e}", []
-
-                        n  = min(int(n_samples), len(df))
-                        df = df.sample(n=n, random_state=42).reset_index(drop=True) \
-                             if use_random else df.head(n)
-
-                        questions  = df[question_col].tolist()
-                        references = df[answer_col].tolist()
-                        records, table_rows = [], []
-
-                        for i, query in enumerate(questions):
-                            try:
-                                _, updated_hist = respond(
-                                    query, openai, serp, gemini, deepseek,
-                                    [], use_hist, tasks, True, selected_models)
-                                report_text = ""
-                                if updated_hist and updated_hist[-1] and \
-                                        len(updated_hist[-1]) == 2:
-                                    report_text = updated_hist[-1][1] or ""
-                            except Exception as e:
-                                logger.error(f"Erro na questão {i}: {e}", exc_info=True)
-                                report_text = ""
-
-                            for model in selected_models:
-                                model_response = extract_model_response_from_report(
-                                    report_text, model.upper()) or ""
-                                record = self._bb_evaluator.build_record(
-                                    pergunta=query,
-                                    modelo=model,
-                                    resposta=model_response,
-                                    reference=references[i],
-                                )
-                                records.append(record)
-                                table_rows.append([
-                                    query, model, model_response,
-                                    record["P"], record["R"], record["F1"],
-                                ])
-
-                        saved_path = BioBertScoreEvaluator.save(records)
-                        summary    = self._bb_evaluator.summarize(records, selected_models, n)
-                        return f"{summary}\n\n✅ Resultados salvos em `{saved_path}`.", table_rows
+                        return run_csv_eval(
+                            file_path, selected_models, n_samples, use_random,
+                            openai, serp, gemini, deepseek, use_hist, tasks,
+                            respond=respond,
+                            extract_fn=extract_model_response_from_report,
+                            evaluator=self._bb_evaluator,
+                            lang="en")
 
                     btn_run_csv_bb.click(
                         fn=run_csv_benchmark_biobert,
@@ -826,8 +733,9 @@ class Interface:
                         "Avalia as respostas dos modelos com um LLM como juiz, "
                         "usando 5 critérios: **corretude, completude, segurança, "
                         "clareza e relevância**.\n\n"
-                        "As colunas de pergunta e resposta (gabarito) do CSV são "
-                        "detectadas automaticamente.")
+                        "Escolha o **idioma dos dados**: em português ele usa as colunas "
+                        "`_pt` (ou `question`/`answer` no MedPT); em inglês usa as colunas "
+                        "originais (ou `question_en`/`answer_en` no MedPT).")
 
                     with gr.Row():
                         geval_file_csv = gr.File(
@@ -850,6 +758,10 @@ class Interface:
                             label="Modelo juiz",
                             choices=["gpt-4o-mini","gpt-4o","gpt-4-turbo"],
                             value="gpt-4o-mini", scale=1)
+                        geval_lang = gr.Dropdown(
+                            label="Idioma dos dados",
+                            choices=["pt", "en"],
+                            value="pt", scale=1)
                         geval_criteria = gr.CheckboxGroup(
                             label="Critérios",
                             choices=GEVAL_CRITERIA,
@@ -868,7 +780,7 @@ class Interface:
                     def run_geval_benchmark(
                         file_path, selected_models, n_samples, use_random,
                         judge_model, selected_criteria,
-                        openai, serp, gemini, deepseek, use_hist, tasks
+                        openai, serp, gemini, deepseek, use_hist, tasks, lang
                     ):
                         return geval_csv(
                             file_path=file_path,
@@ -881,6 +793,7 @@ class Interface:
                             use_hist=use_hist, tasks=tasks,
                             respond_fn=respond,
                             extract_fn=extract_model_response_from_report,
+                            lang=lang,
                         )
 
                     btn_run_geval.click(
@@ -889,18 +802,18 @@ class Interface:
                             geval_file_csv, geval_models, geval_num_samples, geval_random,
                             geval_judge_model, geval_criteria,
                             openai_key, serp_key, gemini_key, deepseek_key,
-                            use_history, tasks_selector,
+                            use_history, tasks_selector, geval_lang,
                         ],
                         outputs=[geval_status, geval_table])
 
-                # ── ABA 7: BENCHMARK CSV + PUBMEDBERTSCORE ───────────────────
+                # ── ABA 7: BENCHMARK CSV + PUBMEDBERTSCORE (INGLÊS) ──────────
                 with gr.Tab("🧬 PubMedBERTScore — CSV"):
                     gr.Markdown(
-                        "Mesmo fluxo do BERTScore, mas usando o **PubMedBERT** "
+                        "Mesmo fluxo do BERTScore, mas em **inglês** e usando o **PubMedBERT** "
                         "(`microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext`) "
-                        "como modelo de embeddings — recomendado para o conjunto em "
-                        "**inglês** (MedDataProcessed). Envie o CSV com colunas de "
-                        "pergunta e resposta, selecione os modelos e calcule P/R/F1.")
+                        "como modelo de embeddings. O CSV pode ser: **PubMedQA** (`question`, "
+                        "`context`, `long_answer`, `final_decision`), **LiveQA/MedQuAD** "
+                        "(`question`, `answer`) ou **MedPT traduzido** (`question_en`, `answer_en`).")
 
                     with gr.Row():
                         file_csv_pmb = gr.File(
@@ -928,60 +841,13 @@ class Interface:
 
                     def run_csv_benchmark_pubmedbert(file_path, selected_models, n_samples, use_random,
                                                      openai, serp, gemini, deepseek, use_hist, tasks):
-                        if file_path is None:
-                            return "❌ Nenhum arquivo enviado.", []
-                        if not selected_models:
-                            return "❌ Selecione pelo menos 1 modelo.", []
-                        try:
-                            df = pd.read_csv(file_path)
-                        except Exception as e:
-                            return f"❌ Erro ao ler CSV: {e}", []
-
-                        # ── detecção automática das colunas de pergunta/resposta ──
-                        try:
-                            question_col, answer_col, _ = detect_csv_qa_columns(df)
-                        except ValueError as e:
-                            return f"❌ {e}", []
-
-                        n  = min(int(n_samples), len(df))
-                        df = df.sample(n=n, random_state=42).reset_index(drop=True) \
-                             if use_random else df.head(n)
-
-                        questions  = df[question_col].tolist()
-                        references = df[answer_col].tolist()
-                        records, table_rows = [], []
-
-                        for i, query in enumerate(questions):
-                            try:
-                                _, updated_hist = respond(
-                                    query, openai, serp, gemini, deepseek,
-                                    [], use_hist, tasks, True, selected_models)
-                                report_text = ""
-                                if updated_hist and updated_hist[-1] and \
-                                        len(updated_hist[-1]) == 2:
-                                    report_text = updated_hist[-1][1] or ""
-                            except Exception as e:
-                                logger.error(f"Erro na questão {i}: {e}", exc_info=True)
-                                report_text = ""
-
-                            for model in selected_models:
-                                model_response = extract_model_response_from_report(
-                                    report_text, model.upper()) or ""
-                                record = self._pmb_evaluator.build_record(
-                                    pergunta=query,
-                                    modelo=model,
-                                    resposta=model_response,
-                                    reference=references[i],
-                                )
-                                records.append(record)
-                                table_rows.append([
-                                    query, model, model_response,
-                                    record["P"], record["R"], record["F1"],
-                                ])
-
-                        saved_path = PubMedBertScoreEvaluator.save(records)
-                        summary    = self._pmb_evaluator.summarize(records, selected_models, n)
-                        return f"{summary}\n\n✅ Resultados salvos em `{saved_path}`.", table_rows
+                        return run_csv_eval(
+                            file_path, selected_models, n_samples, use_random,
+                            openai, serp, gemini, deepseek, use_hist, tasks,
+                            respond=respond,
+                            extract_fn=extract_model_response_from_report,
+                            evaluator=self._pmb_evaluator,
+                            lang="en")
 
                     btn_run_csv_pmb.click(
                         fn=run_csv_benchmark_pubmedbert,
