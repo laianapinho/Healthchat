@@ -40,8 +40,9 @@ class openCHA(BaseModel):
 
     multi_llm_enable_cache: bool = True
     multi_llm_timeout: int = 500
-    multi_llm_max_workers: int = 3
-    multi_llm_enable_retry: bool = True
+    multi_llm_max_workers: int = 4
+    #multi_llm_enable_retry: bool = True
+    multi_llm_enable_retry: bool = False
     multi_llm_retry_attempts: int = 2
 
     class Config:

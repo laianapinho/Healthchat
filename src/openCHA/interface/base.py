@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 # Devem ser exatamente as mesmas chaves de CRITERIA em openCHA/llmjudge.py.
 GEVAL_CRITERIA = ["corretude", "completude", "seguranca", "clareza", "relevancia"]
 
+# ── Modelos disponíveis para responder ───────────────────────────────────────
+# Os nomes devem bater com as chaves de available_models em
+# openCHA/llms/multi_llm_manager.py.
+MODEL_CHOICES = ["chatgpt", "gemini", "deepseek", "medgemma"]
+
 
 def _judge_dropdown():
     """Seletor do juiz (ChatGPT / DeepSeek / Gemini). Usado no Chat, Arena e G-EVAL."""
@@ -339,24 +344,11 @@ class Interface:
                     with gr.Row():
                         compare_models = gr.CheckboxGroup(
                             label="Modelos",
-                            choices=["chatgpt","gemini","deepseek"],
+                            choices=MODEL_CHOICES,
                             value=["chatgpt","gemini"], scale=1)
                         msg_arena = gr.Textbox(
                             placeholder="Digite a pergunta...",
                             lines=4, show_label=False, scale=3)
-
-                    with gr.Accordion("⚖️ G-EVAL — Avaliar respostas", open=False):
-                        arena_gabarito = gr.Textbox(
-                            label="Gabarito / resposta esperada (opcional)",
-                            placeholder="Deixe vazio para avaliar sem referência...",
-                            lines=2)
-                        with gr.Row():
-                            arena_judge = _judge_dropdown()         # ← NOVO
-                            arena_geval_criteria = gr.CheckboxGroup(
-                                label="Critérios",
-                                choices=GEVAL_CRITERIA,
-                                value=GEVAL_CRITERIA,
-                                scale=3)
 
                     btn_send_arena = gr.Button("⚔️ Comparar modelos", variant="primary")
                     arena_status   = gr.Markdown()
@@ -365,24 +357,19 @@ class Interface:
                         card_chatgpt  = gr.Markdown(elem_classes="model-card")
                         card_gemini   = gr.Markdown(elem_classes="model-card")
                         card_deepseek = gr.Markdown(elem_classes="model-card")
+                        card_medgemma = gr.Markdown(elem_classes="model-card")
 
-                    arena_geval_table = gr.Dataframe(
-                        headers=["modelo"] + GEVAL_CRITERIA + ["média"],
-                        datatype=["str"] + ["number"] * 6,
-                        row_count=3, col_count=(7,"fixed"),
-                        label="G-EVAL — Comparação entre modelos",
-                        visible=False)
-
-                    def respond_arena(msg, gabarito, criteria, openai, serp, gemini,
-                                      deepseek, use_hist, tasks, models, judge):
+                    def respond_arena(msg, openai, serp, gemini, deepseek,
+                                      use_hist, tasks, models):
                         # IMPORTANTE: generator (usa yield). Use yield + return.
+                        # Ordem das saídas: status, chatgpt, gemini, deepseek, medgemma.
                         if not msg or not msg.strip():
-                            yield "⚠️ Digite uma mensagem.", "", "", "", gr.update(visible=False), []
+                            yield "⚠️ Digite uma mensagem.", "", "", "", ""
                             return
                         if not models:
-                            yield "⚠️ Selecione pelo menos 1 modelo.", "", "", "", gr.update(visible=False), []
+                            yield "⚠️ Selecione pelo menos 1 modelo.", "", "", "", ""
                             return
-                        yield f"⏳ Comparando {', '.join(models)}...", "", "", "", gr.update(visible=False), []
+                        yield f"⏳ Comparando {', '.join(models)}...", "", "", "", ""
                         _, updated_hist = respond(msg, openai, serp, gemini, deepseek,
                                                   [], use_hist, tasks, True, models)
                         report_text = ""
@@ -395,28 +382,21 @@ class Interface:
                         out_cg = pick("chatgpt")  if "chatgpt"  in models else "—"
                         out_gm = pick("gemini")   if "gemini"   in models else "—"
                         out_ds = pick("deepseek") if "deepseek" in models else "—"
-
-                        responses = {"chatgpt": out_cg, "gemini": out_gm, "deepseek": out_ds}
-                        geval_rows, table_visible = geval_arena(
-                            pergunta=msg, gabarito=gabarito, criteria=criteria,
-                            openai_key=openai, models=models, responses=responses,
-                            judge=judge, gemini_key=gemini, deepseek_key=deepseek)
+                        out_mg = pick("medgemma") if "medgemma" in models else "—"
 
                         yield (
                             "✅ Pronto.",
                             f"### 🟢 ChatGPT\n\n{out_cg}",
                             f"### 🔵 Gemini\n\n{out_gm}",
                             f"### 🟣 DeepSeek\n\n{out_ds}",
-                            table_visible,
-                            geval_rows,
+                            f"### 🟠 MedGemma\n\n{out_mg}",
                         )
 
                     btn_send_arena.click(fn=respond_arena,
-                        inputs=[msg_arena, arena_gabarito, arena_geval_criteria,
-                                openai_key, serp_key, gemini_key, deepseek_key,
-                                use_history, tasks_selector, compare_models, arena_judge],
+                        inputs=[msg_arena, openai_key, serp_key, gemini_key, deepseek_key,
+                                use_history, tasks_selector, compare_models],
                         outputs=[arena_status, card_chatgpt, card_gemini, card_deepseek,
-                                 arena_geval_table, arena_geval_table])
+                                 card_medgemma])
 
                 # ── ABA 3: BENCHMARK JSON ─────────────────────────────────────
                 with gr.Tab("📁 Benchmark JSON"):
@@ -526,7 +506,7 @@ class Interface:
                             file_types=[".csv"], type="filepath", scale=2)
                         models_select = gr.CheckboxGroup(
                             label="Modelos",
-                            choices=["chatgpt","gemini","deepseek"],
+                            choices=MODEL_CHOICES,
                             value=["chatgpt","gemini","deepseek"], scale=1)
 
                     with gr.Row():
@@ -576,7 +556,7 @@ class Interface:
                             file_types=[".csv"], type="filepath", scale=2)
                         models_select_bb = gr.CheckboxGroup(
                             label="Modelos",
-                            choices=["chatgpt","gemini","deepseek"],
+                            choices=MODEL_CHOICES,
                             value=["chatgpt","gemini","deepseek"], scale=1)
 
                     with gr.Row():
@@ -748,7 +728,7 @@ class Interface:
                             file_types=[".csv"], type="filepath", scale=2)
                         geval_models = gr.CheckboxGroup(
                             label="Modelos a avaliar",
-                            choices=["chatgpt","gemini","deepseek"],
+                            choices=MODEL_CHOICES,
                             value=["chatgpt","gemini","deepseek"], scale=1)
 
                     with gr.Row():
@@ -822,7 +802,7 @@ class Interface:
                             file_types=[".csv"], type="filepath", scale=2)
                         models_select_pmb = gr.CheckboxGroup(
                             label="Modelos",
-                            choices=["chatgpt","gemini","deepseek"],
+                            choices=MODEL_CHOICES,
                             value=["chatgpt","gemini","deepseek"], scale=1)
 
                     with gr.Row():

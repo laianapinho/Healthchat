@@ -6,3 +6,4 @@ class LLMType(str, Enum):
     DEEPSEEK = "deepseek"
     ANTHROPIC = "anthropic"
     GEMINI = "gemini"
+    MEDGEMMA = "medgemma"

@@ -113,6 +113,7 @@ class MultiLLMManager:
             "chatgpt": LLMType.OPENAI,
             "deepseek": LLMType.DEEPSEEK,
             "gemini": LLMType.GEMINI,
+            "medgemma": LLMType.MEDGEMMA, 
         }
 
         self.models: Dict[str, LLMType] = {}
@@ -275,6 +276,8 @@ class MultiLLMManager:
             }
 
         except Exception as e:
+
+            logger.error(f"{name} falhou: {type(e).__name__}: {e}", exc_info=True)
 
             elapsed = round((time.time() - start_time) * 1000, 2)
 
