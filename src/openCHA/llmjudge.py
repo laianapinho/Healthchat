@@ -1,54 +1,32 @@
 """
 LLM Judge: Avaliação automática de respostas usando outro LLM como juiz.
 
-VERSÃO BILÍNGUE (português / inglês):
-    O idioma é escolhido pelo parâmetro `lang` ("pt" ou "en"). Ele troca o
-    PROMPT do juiz e a DESCRIÇÃO dos critérios. As chaves dos critérios
-    continuam as mesmas nos dois idiomas (corretude, completude, seguranca,
-    clareza, relevancia), então tabelas, JSONs e resumos não mudam.
+VERSÃO BILÍNGUE (português / inglês) + JUIZ INTERCALÁVEL (ChatGPT / DeepSeek / Gemini)
 
-Combina DUAS técnicas do artigo original:
-    1. Chain-of-Thought (CoT)  → o juiz escreve uma análise crítica ANTES
-                                  de dar a nota, reduzindo notas infladas.
-    2. Probabilidades dos tokens (logprobs) → em vez de usar só o número
-                                  que o juiz "escolheu" (ex: nota=4), olhamos
-                                  a probabilidade de CADA nota possível
-                                  (1,2,3,4,5) e calculamos uma média ponderada.
-                                  Isso dá uma nota contínua (ex: 3.87) mais
-                                  fiel à "opinião real" do modelo, em vez de
-                                  um número inteiro arredondado.
+    - Idioma: parâmetro `lang` ("pt" ou "en"). Troca o PROMPT do juiz e a
+      DESCRIÇÃO dos critérios. As chaves dos critérios são as mesmas nos dois
+      idiomas (corretude, completude, seguranca, clareza, relevancia).
 
-Para conseguir usar logprobs MESMO com Chain-of-Thought, a estrutura do
-prompt foi pensada assim:
-    ANÁLISE / ANALYSIS: <texto livre, sem limite de formato>
-    NOTA / SCORE:       <aqui SEMPRE vem só um dígito, e é o ÚLTIMO token relevante>
+    - Juiz: parâmetro `judge` ("chatgpt", "deepseek" ou "gemini").
+      Os três usam a biblioteca `openai`; só mudam `base_url`, modelo e chave.
 
-Como pedimos max_tokens generosos (300) mas o dígito da nota fica sempre
-no final, conseguimos localizar exatamente qual token da resposta é o
-dígito da nota e pegar os logprobs dele.
+Combina DUAS técnicas:
+    1. Chain-of-Thought (CoT)  → o juiz escreve uma análise ANTES da nota.
+    2. Probabilidades dos tokens (logprobs) → nota contínua (média ponderada).
+       Se o juiz escolhido não suportar logprobs, o código refaz a chamada
+       sem eles e usa só a nota do token (probabilidades ficam vazias).
 
-TRANSPARÊNCIA DA AVALIAÇÃO (salva no JSON, não no terminal):
-Cada critério avaliado gera, além da nota final, três campos extras
-salvos no resultado e persistidos em results_llmjudge.json:
-    - "{criterio}_analise"        : texto da justificativa do juiz
-    - "{criterio}_nota_token"     : nota "crua" escolhida pelo modelo (int)
-    - "{criterio}_probabilidades" : dict {"1": 0.02, "2": 0.10, ...} com a
-                                     distribuição de confiança do juiz sobre
-                                     cada nota possível
-Isso permite auditar depois, lendo o JSON, exatamente por que o juiz deu
-determinada nota e quão confiante ele estava — sem poluir o terminal
-durante a execução.
-
-PERSISTÊNCIA (JSON gerado nos 3 fluxos):
+PERSISTÊNCIA (JSON):
     - geval_chat  → results_llmjudge_chat.json
     - geval_arena → results_llmjudge_arena.json
-    - geval_csv   → results_llmjudge_csv.json  (nome mantido por padrão)
+    - geval_csv   → results_llmjudge_csv.json
+Cada registro traz "juiz" e "juiz_modelo" (quem avaliou).
 
 Contém:
   - LLMJudgeEvaluator : classe principal
-  - geval_chat()      : função pronta para o chat normal (Gradio)
-  - geval_arena()     : função pronta para a arena Multi-LLM (Gradio)
-  - geval_csv()       : função pronta para o benchmark CSV (Gradio)
+  - geval_chat()      : chat normal (Gradio)
+  - geval_arena()     : arena Multi-LLM (Gradio)
+  - geval_csv()       : benchmark CSV (Gradio)
 """
 from __future__ import annotations
 
@@ -74,15 +52,6 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # 1) CRITÉRIOS DE AVALIAÇÃO
 # =============================================================================
-# Conjunto reduzido, usado no juiz online: apenas 5 métricas.
-#   - corretude   : a resposta está clinicamente correta?
-#   - completude  : a resposta contém as informações necessárias?
-#   - seguranca   : a resposta evita conteúdo perigoso/inadequado?
-#   - clareza     : a resposta é compreensível e bem estruturada?
-#   - relevancia  : a resposta responde ao que foi perguntado, sem se desviar?
-#
-# CRITERIA (português) mantém o nome original. CRITERIA_EN é a versão em
-# inglês, com as MESMAS chaves. CRITERIA_BY_LANG escolhe pelo idioma.
 
 CRITERIA = {
     "corretude": (
@@ -180,13 +149,6 @@ CRITERIA_BY_LANG = {"pt": CRITERIA, "en": CRITERIA_EN}
 # =============================================================================
 # 2) PROMPTS — Chain-of-Thought + nota SEMPRE no final
 # =============================================================================
-# IMPORTANTE: a nota precisa ficar no FINAL da resposta (depois da análise)
-# para que possamos capturar os logprobs do último token gerado, que será
-# o dígito da nota. Se a nota viesse antes da análise, não daria pra usar
-# essa técnica (o modelo ainda não tinha "pensado" quando decidiu o número).
-#
-# O gabarito pode trazer VÁRIAS respostas de referência separadas por "---"
-# (ex.: LiveQA). Os prompts avisam o juiz sobre isso.
 
 PROMPT_COM_REFERENCIA = """Você é um avaliador especialista, rigoroso e criterioso, em qualidade de \
 respostas médicas e de saúde. Seu trabalho é encontrar falhas reais, não elogiar por educação.
@@ -294,11 +256,52 @@ Respond EXACTLY in this format, with the score always last:
 ANALYSIS: <your critical analysis in 2-4 sentences>
 SCORE: <a single digit from 1 to 5>"""
 
-# (prompt com gabarito, prompt sem gabarito) por idioma
 PROMPTS_BY_LANG = {
     "pt": (PROMPT_COM_REFERENCIA, PROMPT_SEM_REFERENCIA),
     "en": (PROMPT_WITH_REFERENCE_EN, PROMPT_WITHOUT_REFERENCE_EN),
 }
+
+
+# =============================================================================
+# 2.1) JUÍZES DISPONÍVEIS (ChatGPT / DeepSeek / Gemini)
+# =============================================================================
+# Os três usam a biblioteca `openai`: DeepSeek e Gemini têm endpoints
+# compatíveis, então só mudam base_url, modelo e chave.
+# Confira os nomes dos modelos na documentação de cada provedor.
+# Gemini 2.5 usa "thinking", que consome tokens -> max_tokens maior.
+
+JUDGES = {
+    "chatgpt": {
+        "base_url": None,
+        "model": "gpt-4o-mini",
+        "max_tokens": 300,
+    },
+    "deepseek": {
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-flash",   # se der erro, tente "deepseek-v4-flash"
+        "max_tokens": 300,
+        # modo de raciocínio gasta os tokens e deixa o content vazio
+        "extra_body": {"thinking": {"type": "disabled"}},
+    },
+    "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "model": "gemini-3.5-flash",
+        "max_tokens": 2048,
+        "logprobs": False,           # série Gemini 3 não retorna logprobs
+    },
+}
+JUDGE_CHOICES = list(JUDGES.keys())   # ["chatgpt", "deepseek", "gemini"]
+
+
+def pick_key(judge: str, openai_key, gemini_key, deepseek_key) -> str:
+    """Devolve a chave do juiz escolhido ou levanta ValueError."""
+    if judge not in JUDGES:
+        raise ValueError(f"Juiz '{judge}' não suportado.")
+    key = {"chatgpt": openai_key, "gemini": gemini_key,
+           "deepseek": deepseek_key}.get(judge)
+    if not key or not key.strip():
+        raise ValueError(f"Insira a API Key do {judge} para usá-lo como juiz.")
+    return key.strip()
 
 
 # =============================================================================
@@ -307,46 +310,42 @@ PROMPTS_BY_LANG = {
 
 class LLMJudgeEvaluator:
     """
-    Avalia respostas de LLMs usando outro LLM como juiz.
-
-    Combina Chain-of-Thought (análise antes da nota) com probabilidades
-    dos tokens (logprobs) para calcular uma nota final contínua e mais
-    fiel à "confiança" do modelo em cada nota possível.
+    Avalia respostas de LLMs usando outro LLM como juiz (ChatGPT, DeepSeek
+    ou Gemini), combinando Chain-of-Thought com logprobs quando disponíveis.
     """
 
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-4o-mini",
+        judge: str = "chatgpt",
         criteria: Optional[List[str]] = None,
-        max_tokens: int = 300,
         verbose_terminal: bool = False,
         lang: str = "pt",
     ):
         """
         Args:
-            api_key          : chave da API OpenAI.
-            model             : modelo juiz (precisa suportar logprobs;
-                                 gpt-4o-mini e gpt-4o suportam).
-            criteria          : lista de critérios a avaliar.
-            max_tokens        : limite de tokens de saída (análise + nota).
-            verbose_terminal  : se True, imprime no terminal a distribuição
-                                 de probabilidades (1,2,3,4,5) de cada nota
-                                 dada, junto com a análise do juiz.
-                                 Padrão False — esses dados agora vão direto
-                                 para o JSON salvo (ver método save()), não
-                                 precisam mais aparecer no terminal.
-            lang              : idioma do prompt do juiz e dos critérios:
-                                 "pt" (padrão) ou "en".
+            api_key          : chave da API do juiz escolhido.
+            judge            : "chatgpt", "deepseek" ou "gemini".
+            criteria         : lista de critérios a avaliar.
+            verbose_terminal : imprime análise/probabilidades no terminal.
+            lang             : "pt" (padrão) ou "en".
         """
         if lang not in PROMPTS_BY_LANG:
             raise ValueError(f"Idioma '{lang}' não suportado (use 'pt' ou 'en').")
+        if judge not in JUDGES:
+            raise ValueError(f"Juiz '{judge}' não suportado.")
+        cfg = JUDGES[judge]
+
         self.api_key          = api_key
-        self.model             = model
-        self.criteria          = criteria or list(CRITERIA.keys())
-        self.max_tokens        = max_tokens
-        self.verbose_terminal  = verbose_terminal
-        self.lang              = lang
+        self.judge            = judge
+        self.base_url         = cfg["base_url"]
+        self.model            = cfg["model"]
+        self.max_tokens       = cfg["max_tokens"]
+        self.extra_body       = cfg.get("extra_body")
+        self.criteria         = criteria or list(CRITERIA.keys())
+        self.verbose_terminal = verbose_terminal
+        self.lang             = lang
+        self._use_logprobs    = cfg.get("logprobs", True)   # vira False se a API recusar
 
     # ------------------------------------------------------------------
     # Avaliação de UM critério (com CoT + logprobs)
@@ -360,18 +359,6 @@ class LLMJudgeEvaluator:
         referencia: Optional[str] = None,
         modelo_avaliado: str = "?",
     ) -> Dict[str, Any]:
-        """
-        Faz UMA chamada à API, pedindo análise + nota, e captura os
-        logprobs do token da nota para calcular a média ponderada.
-
-        Retorna:
-            {
-                "nota_token"  : nota que o modelo "escolheu" de fato (int),
-                "nota_ponderada" : média ponderada pelas probabilidades,
-                "analise"     : texto da análise crítica,
-                "probabilidades" : dict {"1": 0.05, "2": 0.10, ...} (em %)
-            }
-        """
         criterio_desc = CRITERIA_BY_LANG[self.lang][criterio_key]
         prompt_com_ref, prompt_sem_ref = PROMPTS_BY_LANG[self.lang]
 
@@ -384,53 +371,73 @@ class LLMJudgeEvaluator:
                 pergunta=pergunta, resposta=resposta, criterio=criterio_desc)
 
         try:
-            client = openai.OpenAI(api_key=self.api_key)
-            response = client.chat.completions.create(
+            client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
+            kwargs = dict(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=self.max_tokens,
                 temperature=0.0,
-                logprobs=True,        # pede as probabilidades de cada token gerado
-                top_logprobs=5,       # para cada token, traz as 5 alternativas mais prováveis
             )
+            if self.extra_body:
+                kwargs["extra_body"] = self.extra_body
 
-            raw = response.choices[0].message.content.strip()
+            if self._use_logprobs:
+                try:
+                    response = client.chat.completions.create(
+                        **kwargs, logprobs=True, top_logprobs=5)
+                except Exception as e:
+                    # provedor/modelo não aceita logprobs → refaz sem eles
+                    logger.warning(
+                        f"{self.judge} sem logprobs ({e}); usando só o token.")
+                    self._use_logprobs = False
+                    response = client.chat.completions.create(**kwargs)
+            else:
+                response = client.chat.completions.create(**kwargs)
+
+            raw = (response.choices[0].message.content or "").strip()
+            if not raw:
+                finish = getattr(response.choices[0], "finish_reason", "?")
+                msg = (f"Erro: resposta vazia do juiz {self.judge}/{self.model} "
+                       f"(finish_reason={finish}). Provável: tokens consumidos "
+                       f"pelo raciocínio; aumente max_tokens ou desligue o thinking.")
+                logger.error(f"LLMJudge [{criterio_key}]: {msg}")
+                return {"nota_token": 0.0, "nota_ponderada": 0.0,
+                        "analise": msg, "probabilidades": {}}
             parsed = self._parse_response(raw)
+            if parsed["nota_texto"] is None:
+                logger.warning(
+                    f"LLMJudge [{self.judge}/{criterio_key}]: sem NOTA no texto: {raw[:200]!r}")
 
-            # tenta extrair a distribuição de probabilidades do token da nota
-            prob_info = self._extract_note_probabilities(response, parsed["nota_texto"])
+            prob_info = None
+            if self._use_logprobs:
+                prob_info = self._extract_note_probabilities(
+                    response, parsed["nota_texto"])
 
             resultado = {
-                "nota_token":      parsed["nota"],
-                "nota_ponderada":  prob_info["nota_ponderada"] if prob_info else parsed["nota"],
-                "analise":         parsed["analise"],
-                "probabilidades":  prob_info["probabilidades"] if prob_info else {},
+                "nota_token":     parsed["nota"],
+                "nota_ponderada": prob_info["nota_ponderada"] if prob_info else parsed["nota"],
+                "analise":        parsed["analise"],
+                "probabilidades": prob_info["probabilidades"] if prob_info else {},
             }
 
-            # ── impressão no terminal ────────────────────────────────
             if self.verbose_terminal:
                 self._print_terminal(modelo_avaliado, criterio_key, resultado)
 
             return resultado
 
         except Exception as e:
-            logger.error(f"LLMJudge [{criterio_key}]: {e}")
+            logger.error(f"LLMJudge [{self.judge}/{criterio_key}]: {e}")
             return {
                 "nota_token": 0.0, "nota_ponderada": 0.0,
                 "analise": f"Erro: {e}", "probabilidades": {},
             }
 
     def _parse_response(self, raw: str) -> Dict[str, Any]:
-        """
-        Extrai ANÁLISE/ANALYSIS e NOTA/SCORE do texto gerado (aceita os
-        rótulos em português e em inglês).
-        Retorna também "nota_texto" (string do dígito, ex: "4") para
-        depois localizar o token correspondente nos logprobs.
-        """
+        """Extrai ANÁLISE/ANALYSIS e NOTA/SCORE do texto gerado."""
         analise_match = re.search(
             r"(?:AN[ÁA]LISE|ANALYSIS):\s*(.+?)(?=(?:NOTA|SCORE):|$)",
             raw, re.DOTALL | re.IGNORECASE)
-        nota_match    = re.search(r"(?:NOTA|SCORE):\s*(\d)", raw, re.IGNORECASE)
+        nota_match = re.search(r"(?:NOTA|SCORE):\s*\**\s*(\d)", raw, re.IGNORECASE)
 
         analise    = analise_match.group(1).strip() if analise_match else raw.strip()
         nota_texto = nota_match.group(1) if nota_match else None
@@ -445,22 +452,8 @@ class LLMJudgeEvaluator:
         nota_texto: Optional[str],
     ) -> Optional[Dict[str, Any]]:
         """
-        Procura, dentro dos logprobs retornados pela API, o token que
-        corresponde ao dígito da nota (ex: "4") e extrai a distribuição
-        de probabilidades sobre os dígitos 1-5 nesse ponto da geração.
-
-        Por que precisamos "procurar" o token?
-        A resposta inteira (análise + nota) é gerada token a token. Os
-        logprobs vêm como uma LISTA, um item por token gerado. Precisamos
-        achar QUAL item dessa lista corresponde ao dígito da nota (que
-        fica no final do texto, depois de "NOTA: " / "SCORE: ").
-
-        Retorna:
-            {
-                "nota_ponderada": float,         # média ponderada (G-EVAL)
-                "probabilidades": {"1": 0.05, ...}  # em proporção (soma ~1.0)
-            }
-            ou None se não conseguir localizar o token.
+        Procura nos logprobs o token do dígito da nota e extrai a distribuição
+        de probabilidades sobre 1-5. Retorna None se não conseguir.
         """
         if not nota_texto:
             return None
@@ -470,15 +463,9 @@ class LLMJudgeEvaluator:
             if not logprob_content:
                 return None
 
-            # Percorre os tokens gerados procurando aquele cujo texto é
-            # exatamente o dígito da nota (ex: "4"). Como a nota é o
-            # ÚLTIMO conteúdo relevante da resposta, percorremos de trás
-            # para frente — assim encontramos a ocorrência correta mesmo
-            # se o dígito aparecer também dentro da análise por acaso.
+            # De trás para frente: a nota é o último conteúdo relevante.
             for token_info in reversed(logprob_content):
                 if token_info.token.strip() == nota_texto:
-                    # achamos o token da nota — agora olhamos as alternativas
-                    # que o modelo considerou nesse mesmo ponto da geração
                     total_prob = 0.0
                     weighted   = 0.0
                     probabilidades = {}
@@ -486,59 +473,38 @@ class LLMJudgeEvaluator:
                     for alt in token_info.top_logprobs:
                         alt_token = alt.token.strip()
                         if alt_token in {"1", "2", "3", "4", "5"}:
-                            prob = math.exp(alt.logprob)  # logprob → probabilidade
-                            probabilidades[alt_token] = prob
+                            prob = math.exp(alt.logprob)
+                            probabilidades[alt_token] = probabilidades.get(alt_token, 0.0) + prob
                             weighted   += int(alt_token) * prob
                             total_prob += prob
 
                     if total_prob == 0:
                         return None
 
-                    # normaliza para que a soma das probabilidades dê ~1.0
-                    # (caso as 5 alternativas não cubram 100% da distribuição)
                     probabilidades = {k: v / total_prob for k, v in probabilidades.items()}
-                    nota_ponderada = weighted / total_prob
-
                     return {
-                        "nota_ponderada": round(nota_ponderada, 4),
+                        "nota_ponderada": round(weighted / total_prob, 4),
                         "probabilidades": probabilidades,
                     }
 
-            return None  # não achou o token da nota nos logprobs
+            return None
 
         except Exception as e:
             logger.warning(f"Não foi possível extrair logprobs da nota: {e}")
             return None
 
-    def _print_terminal(
-        self,
-        modelo: str,
-        criterio: str,
-        resultado: Dict[str, Any],
-    ) -> None:
-        """
-        [OPCIONAL — desligado por padrão via verbose_terminal=False]
-
-        Imprime no terminal a distribuição de probabilidades de cada nota
-        (1 a 5), a análise e a nota final. Útil só para debug manual.
-
-        Esses mesmos dados agora são salvos automaticamente em cada registro
-        do JSON (chaves "{criterio}_analise", "{criterio}_probabilidades",
-        "{criterio}_nota_token"), então normalmente não é necessário ativar
-        isso — basta consultar o arquivo results_llmjudge.json.
-        """
-        print(f"\n[LLMJudge] {modelo} | {criterio}")
+    def _print_terminal(self, modelo: str, criterio: str, resultado: Dict[str, Any]) -> None:
+        """[OPCIONAL] Imprime análise e probabilidades no terminal (debug)."""
+        print(f"\n[LLMJudge:{self.judge}] {modelo} | {criterio}")
         print(f"  Análise: {resultado['analise'][:150]}")
 
         probs = resultado["probabilidades"]
         if probs:
-            # ordena pelas notas 1..5 para imprimir sempre na mesma ordem
             probs_str = " ".join(
-                f"{n}={probs.get(n, 0)*100:.1f}%" for n in ["1","2","3","4","5"]
-            )
+                f"{n}={probs.get(n, 0)*100:.1f}%" for n in ["1", "2", "3", "4", "5"])
             print(f"  Probabilidades: {probs_str}")
         else:
-            print(f"  Probabilidades: (não disponível — usando apenas o token escolhido)")
+            print("  Probabilidades: (não disponível — usando apenas o token escolhido)")
 
         print(f"  Nota (token escolhido)  = {resultado['nota_token']}")
         print(f"  Nota (média ponderada)  = {resultado['nota_ponderada']}")
@@ -556,9 +522,7 @@ class LLMJudgeEvaluator:
     ) -> Dict[str, Any]:
         """
         Avalia uma resposta em todos os critérios configurados.
-
-        Usa a NOTA PONDERADA (logprobs) como nota oficial sempre que
-        disponível; cai para a nota do token escolhido como fallback.
+        Usa a nota ponderada (logprobs) quando disponível; senão, a do token.
         """
         if not resposta or not resposta.strip():
             logger.warning(f"LLMJudge [{modelo}]: resposta vazia")
@@ -566,6 +530,7 @@ class LLMJudgeEvaluator:
                 "timestamp": datetime.now().isoformat(),
                 "pergunta": pergunta, "modelo": modelo,
                 "resposta": resposta, "com_referencia": False,
+                "juiz": self.judge, "juiz_modelo": self.model,
                 "media": 0.0,
             }
             for c in self.criteria:
@@ -580,13 +545,14 @@ class LLMJudgeEvaluator:
 
         for c in self.criteria:
             r = self._score_one(pergunta, resposta, c, referencia, modelo_avaliado=modelo)
-            # nota oficial = ponderada (mais fiel); cai pro token se logprobs falhar
             scores[c]             = r["nota_ponderada"] if r["probabilidades"] else r["nota_token"]
             analises[c]           = r["analise"]
             notas_token[c]        = r["nota_token"]
             probs_por_criterio[c] = r["probabilidades"]
 
-        media = round(sum(scores.values()) / len(scores), 4) if scores else 0.0
+        # ignora critérios que falharam (nota 0) para não derrubar a média
+        validos = [v for v in scores.values() if v > 0]
+        media = round(sum(validos) / len(validos), 4) if validos else 0.0
 
         result = {
             "timestamp":      datetime.now().isoformat(),
@@ -594,27 +560,26 @@ class LLMJudgeEvaluator:
             "modelo":         modelo,
             "resposta":       resposta,
             "com_referencia": bool(referencia and referencia.strip()),
+            "juiz":           self.judge,
+            "juiz_modelo":    self.model,
             "media":          media,
         }
         for c in self.criteria:
-            # nota final (ponderada quando disponível) — usada nas tabelas/resumos
             result[c]                     = scores[c]
-            # análise textual do juiz para esse critério
             result[f"{c}_analise"]        = analises[c]
-            # nota "crua" que o modelo escolheu como token (sem ponderação)
             result[f"{c}_nota_token"]     = notas_token[c]
-            # distribuição completa de probabilidades {"1": 0.02, "2": 0.10, ...}
             result[f"{c}_probabilidades"] = probs_por_criterio[c]
 
         return result
 
     # ------------------------------------------------------------------
-    # Resumo e persistência (sem mudanças na lógica, só nomes)
+    # Resumo e persistência
     # ------------------------------------------------------------------
 
     @staticmethod
     def summarize(records: List[Dict[str, Any]], models: List[str], n: int) -> str:
-        lines = [f"### 🏛️ LLM Judge — Médias por modelo ({n} questão/ões)\n"]
+        juiz = records[0].get("juiz", "?").upper() if records else "?"
+        lines = [f"### 🏛️ LLM Judge ({juiz}) — Médias por modelo ({n} questão/ões)\n"]
         for model in models:
             mrs = [r for r in records if r["modelo"] == model and r["media"] > 0]
             if not mrs:
@@ -642,7 +607,7 @@ class LLMJudgeEvaluator:
 
 
 # =============================================================================
-# 4) FUNÇÕES PRONTAS PARA O GRADIO  (agora com persistência nos 3 fluxos)
+# 4) FUNÇÕES PRONTAS PARA O GRADIO
 # =============================================================================
 
 def geval_chat(
@@ -651,14 +616,19 @@ def geval_chat(
     criteria: List[str],
     openai_key: str,
     lang: str = "pt",
+    judge: str = "chatgpt",
+    gemini_key: Optional[str] = None,
+    deepseek_key: Optional[str] = None,
 ) -> Tuple[List, str]:
     """Avalia a última resposta do chat normal."""
     if not chat_hist:
         return [], "⚠️ Nenhuma conversa ainda."
-    if not openai_key or not openai_key.strip():
-        return [], "❌ Insira a OpenAI API Key para usar o LLM Judge."
     if not criteria:
         return [], "❌ Selecione pelo menos 1 critério."
+    try:
+        key = pick_key(judge, openai_key, gemini_key, deepseek_key)
+    except ValueError as e:
+        return [], f"❌ {e}"
 
     last = [(u, a) for (u, a) in chat_hist if a]
     if not last:
@@ -667,13 +637,12 @@ def geval_chat(
     pergunta, resposta = last[-1]
     referencia = gabarito.strip() if gabarito and gabarito.strip() else None
 
-    evaluator = LLMJudgeEvaluator(api_key=openai_key, criteria=criteria, lang=lang)
-    record    = evaluator.evaluate(
+    evaluator = LLMJudgeEvaluator(
+        api_key=key, judge=judge, criteria=criteria, lang=lang)
+    record = evaluator.evaluate(
         pergunta=pergunta, resposta=resposta,
         modelo="chat", referencia=referencia)
 
-    # ── persistência: salva também a avaliação feita no chat normal ──
-    # arquivo separado do benchmark CSV para não misturar contextos
     saved_path = LLMJudgeEvaluator.save(
         [record], file_path="results_llmjudge_chat.json")
 
@@ -681,7 +650,8 @@ def geval_chat(
     rows  = [[c, record.get(c, 0), record.get(f"{c}_analise", "")[:100]] for c in criteria]
     media = record.get("media", 0)
     rows.append(["**MÉDIA**", media, ""])
-    return rows, f"✅ Média: **{media:.2f} / 5.0** ({modo}) — salvo em `{saved_path}`"
+    return rows, (f"✅ Juiz: **{judge}** · Média: **{media:.2f} / 5.0** ({modo}) "
+                  f"— salvo em `{saved_path}`")
 
 
 def geval_arena(
@@ -692,17 +662,24 @@ def geval_arena(
     models: List[str],
     responses: Dict[str, str],
     lang: str = "pt",
+    judge: str = "chatgpt",
+    gemini_key: Optional[str] = None,
+    deepseek_key: Optional[str] = None,
 ) -> Tuple[List, Any]:
     """Avalia as respostas da arena lado a lado."""
     import gradio as gr
 
-    if not openai_key or not openai_key.strip() or not criteria:
+    if not criteria:
+        return [], gr.update(visible=False)
+    try:
+        key = pick_key(judge, openai_key, gemini_key, deepseek_key)
+    except ValueError:
         return [], gr.update(visible=False)
 
     referencia = gabarito.strip() if gabarito and gabarito.strip() else None
-    evaluator  = LLMJudgeEvaluator(api_key=openai_key, criteria=criteria, lang=lang)
-    rows       = []
-    records    = []  # ── acumula os registros completos para salvar depois ──
+    evaluator  = LLMJudgeEvaluator(
+        api_key=key, judge=judge, criteria=criteria, lang=lang)
+    rows, records = [], []
 
     for model in models:
         resp   = responses.get(model, "")
@@ -720,8 +697,6 @@ def geval_arena(
             record.get("media",       0),
         ])
 
-    # ── persistência: salva todas as avaliações desta rodada da arena ──
-    # arquivo separado do chat e do benchmark CSV para não misturar contextos
     if records:
         LLMJudgeEvaluator.save(records, file_path="results_llmjudge_arena.json")
 
@@ -733,7 +708,7 @@ def geval_csv(
     selected_models: List[str],
     n_samples: int,
     use_random: bool,
-    judge_model: str,
+    judge: str,
     selected_criteria: List[str],
     openai_key: str,
     serp_key: str,
@@ -746,25 +721,24 @@ def geval_csv(
     lang: str = "pt",
 ) -> Tuple[str, List]:
     """Roda benchmark LLM Judge em um CSV (PubMedQA, LiveQA, MedQuAD ou MedPT),
-    em português (lang="pt") ou inglês (lang="en").
-
-    O idioma escolhe as colunas do CSV, o prompt enviado aos modelos
-    avaliados e o prompt/critérios do juiz."""
+    em português (lang="pt") ou inglês (lang="en"), com o juiz escolhido
+    (chatgpt, deepseek ou gemini)."""
     if file_path is None:
         return "❌ Nenhum arquivo enviado.", []
     if not selected_models:
         return "❌ Selecione pelo menos 1 modelo.", []
-    if not openai_key or not openai_key.strip():
-        return "❌ A OpenAI API Key é necessária para o LLM Judge.", []
     if not selected_criteria:
         return "❌ Selecione pelo menos 1 critério.", []
+    try:
+        judge_key = pick_key(judge, openai_key, gemini_key, deepseek_key)
+    except ValueError as e:
+        return f"❌ {e}", []
 
     try:
         df = pd.read_csv(file_path)
     except Exception as e:
         return f"❌ Erro ao ler CSV: {e}", []
 
-    # ── escolhe as colunas certas e monta as perguntas ──
     try:
         data = prepare_pt_items(df, int(n_samples), use_random, lang=lang)
     except ValueError as e:
@@ -775,7 +749,7 @@ def geval_csv(
         return "❌ Nenhuma linha válida (pergunta e resposta vazias).", []
 
     evaluator = LLMJudgeEvaluator(
-        api_key=openai_key, model=judge_model,
+        api_key=judge_key, judge=judge,
         criteria=selected_criteria, lang=lang)
     records, table_rows = [], []
 
@@ -791,7 +765,6 @@ def geval_csv(
             logger.error(f"Erro na questão {i}: {e}", exc_info=True)
             report_text = ""
 
-        # várias respostas de referência (LiveQA) vão todas para o juiz
         ref = "\n---\n".join(data["references"][i]) or None
 
         for model in selected_models:

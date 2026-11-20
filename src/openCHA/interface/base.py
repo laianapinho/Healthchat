@@ -17,6 +17,7 @@ from openCHA.dataset_tools.csv_column_detector import detect_csv_qa_columns
 from openCHA.dataset_tools.csv_eval_runner import run_csv_eval
 from openCHA.llmjudge import (
     LLMJudgeEvaluator,
+    JUDGE_CHOICES,          # ["chatgpt", "deepseek", "gemini"]
     geval_chat,
     geval_arena,
     geval_csv,
@@ -26,8 +27,14 @@ logger = logging.getLogger(__name__)
 
 # ── Critérios do G-EVAL ───────────────────────────────────────────────────────
 # Devem ser exatamente as mesmas chaves de CRITERIA em openCHA/llmjudge.py.
-# Se mudar lá, mude aqui (e os headers das tabelas abaixo).
 GEVAL_CRITERIA = ["corretude", "completude", "seguranca", "clareza", "relevancia"]
+
+
+def _judge_dropdown():
+    """Seletor do juiz (ChatGPT / DeepSeek / Gemini). Usado no Chat, Arena e G-EVAL."""
+    return gr.Dropdown(
+        label="⚖️ Juiz", choices=JUDGE_CHOICES, value="chatgpt", scale=1)
+
 
 # ── Design tokens ─────────────────────────────────────────────────────────────
 _CSS = """
@@ -165,6 +172,9 @@ class Interface:
       6) BERTScore — Manual
       7) G-EVAL (LLM Juiz)
       8) PubMedBERTScore — CSV      (inglês)
+
+    O juiz do G-EVAL (ChatGPT / DeepSeek / Gemini) pode ser escolhido no
+    Chat, na Arena e na aba G-EVAL.
     """
 
     def __init__(self):
@@ -249,6 +259,7 @@ class Interface:
                             placeholder="Deixe vazio para avaliar sem referência...",
                             lines=3)
                         with gr.Row():
+                            chat_judge = _judge_dropdown()          # ← NOVO
                             chat_geval_criteria = gr.CheckboxGroup(
                                 label="Critérios",
                                 choices=GEVAL_CRITERIA,
@@ -256,8 +267,6 @@ class Interface:
                                 scale=2)
                             btn_geval_chat = gr.Button(
                                 "⚖️ Avaliar", variant="secondary", scale=1)
-                        # geval_chat devolve linhas [critério, nota, análise]
-                        # (5 critérios + 1 linha de MÉDIA = 6 linhas)
                         chat_geval_result = gr.Dataframe(
                             headers=["criterio","nota","analise"],
                             datatype=["str","number","str"],
@@ -296,6 +305,13 @@ class Interface:
                             chat_hist[-1] = (msg, f"❌ Erro: {str(e)}")
                             yield "", chat_hist
 
+                    def run_geval_chat(chat_hist, gabarito, criteria,
+                                       openai, gemini, deepseek, judge):
+                        return geval_chat(
+                            chat_hist=chat_hist, gabarito=gabarito, criteria=criteria,
+                            openai_key=openai, gemini_key=gemini,
+                            deepseek_key=deepseek, judge=judge)
+
                     msg_chat.submit(fn=respond_chat_wrapper,
                         inputs=[msg_chat, openai_key, serp_key, gemini_key, deepseek_key,
                                 state_chat_history, use_history, tasks_selector],
@@ -311,9 +327,9 @@ class Interface:
                     btn_upload_chat.upload(fn=upload_meta,
                         inputs=[state_chat_history, btn_upload_chat],
                         outputs=[state_chat_history])
-                    btn_geval_chat.click(fn=geval_chat,
-                        inputs=[state_chat_history, chat_gabarito,
-                                chat_geval_criteria, openai_key],
+                    btn_geval_chat.click(fn=run_geval_chat,
+                        inputs=[state_chat_history, chat_gabarito, chat_geval_criteria,
+                                openai_key, gemini_key, deepseek_key, chat_judge],
                         outputs=[chat_geval_result, chat_geval_status])
 
                 # ── ABA 2: ARENA ──────────────────────────────────────────────
@@ -334,10 +350,13 @@ class Interface:
                             label="Gabarito / resposta esperada (opcional)",
                             placeholder="Deixe vazio para avaliar sem referência...",
                             lines=2)
-                        arena_geval_criteria = gr.CheckboxGroup(
-                            label="Critérios",
-                            choices=GEVAL_CRITERIA,
-                            value=GEVAL_CRITERIA)
+                        with gr.Row():
+                            arena_judge = _judge_dropdown()         # ← NOVO
+                            arena_geval_criteria = gr.CheckboxGroup(
+                                label="Critérios",
+                                choices=GEVAL_CRITERIA,
+                                value=GEVAL_CRITERIA,
+                                scale=3)
 
                     btn_send_arena = gr.Button("⚔️ Comparar modelos", variant="primary")
                     arena_status   = gr.Markdown()
@@ -347,7 +366,6 @@ class Interface:
                         card_gemini   = gr.Markdown(elem_classes="model-card")
                         card_deepseek = gr.Markdown(elem_classes="model-card")
 
-                    # geval_arena devolve: modelo + 5 critérios + média = 7 colunas
                     arena_geval_table = gr.Dataframe(
                         headers=["modelo"] + GEVAL_CRITERIA + ["média"],
                         datatype=["str"] + ["number"] * 6,
@@ -356,9 +374,8 @@ class Interface:
                         visible=False)
 
                     def respond_arena(msg, gabarito, criteria, openai, serp, gemini,
-                                      deepseek, use_hist, tasks, models):
-                        # IMPORTANTE: esta função é um generator (usa yield), então
-                        # "return valor" não envia nada à interface. Use yield + return.
+                                      deepseek, use_hist, tasks, models, judge):
+                        # IMPORTANTE: generator (usa yield). Use yield + return.
                         if not msg or not msg.strip():
                             yield "⚠️ Digite uma mensagem.", "", "", "", gr.update(visible=False), []
                             return
@@ -382,7 +399,8 @@ class Interface:
                         responses = {"chatgpt": out_cg, "gemini": out_gm, "deepseek": out_ds}
                         geval_rows, table_visible = geval_arena(
                             pergunta=msg, gabarito=gabarito, criteria=criteria,
-                            openai_key=openai, models=models, responses=responses)
+                            openai_key=openai, models=models, responses=responses,
+                            judge=judge, gemini_key=gemini, deepseek_key=deepseek)
 
                         yield (
                             "✅ Pronto.",
@@ -396,7 +414,7 @@ class Interface:
                     btn_send_arena.click(fn=respond_arena,
                         inputs=[msg_arena, arena_gabarito, arena_geval_criteria,
                                 openai_key, serp_key, gemini_key, deepseek_key,
-                                use_history, tasks_selector, compare_models],
+                                use_history, tasks_selector, compare_models, arena_judge],
                         outputs=[arena_status, card_chatgpt, card_gemini, card_deepseek,
                                  arena_geval_table, arena_geval_table])
 
@@ -640,21 +658,13 @@ class Interface:
                         question, reference, selected_models,
                         openai, serp, gemini, deepseek, use_hist, tasks
                     ):
-                        # Validações
                         if not question or not question.strip():
-                            return (
-                                "❌ Digite uma pergunta.", [], "", "", ""
-                            )
+                            return ("❌ Digite uma pergunta.", [], "", "", "")
                         if not reference or not reference.strip():
-                            return (
-                                "❌ Digite a resposta de referência (gabarito).", [], "", "", ""
-                            )
+                            return ("❌ Digite a resposta de referência (gabarito).", [], "", "", "")
                         if not selected_models:
-                            return (
-                                "❌ Selecione pelo menos 1 modelo.", [], "", "", ""
-                            )
+                            return ("❌ Selecione pelo menos 1 modelo.", [], "", "", "")
 
-                        # Gera respostas dos modelos
                         try:
                             _, updated_hist = respond(
                                 question, openai, serp, gemini, deepseek,
@@ -666,13 +676,11 @@ class Interface:
                         except Exception as e:
                             return f"❌ Erro ao gerar respostas: {e}", [], "", "", ""
 
-                        # Coleta respostas por modelo
                         model_responses = {}
                         for model in selected_models:
                             model_responses[model] = extract_model_response_from_report(
                                 report_text, model.upper()) or ""
 
-                        # Calcula BERTScore
                         table_rows = []
                         records    = []
                         for model in selected_models:
@@ -691,14 +699,11 @@ class Interface:
                                 record["F1"],
                             ])
 
-                        # Salva junto com os resultados do CSV
                         BertScoreEvaluator.save(records)
 
-                        # Resumo
                         summary = self._bs_evaluator.summarize(
                             records, selected_models, 1)
 
-                        # Melhor modelo
                         best = max(records, key=lambda r: r["F1"])
                         status_md = (
                             f"{summary}\n\n"
@@ -730,9 +735,9 @@ class Interface:
                 # ── ABA 6: G-EVAL (LLM JUIZ) ──────────────────────────────────
                 with gr.Tab("🏛️ G-EVAL (LLM Juiz)"):
                     gr.Markdown(
-                        "Avalia as respostas dos modelos com um LLM como juiz, "
-                        "usando 5 critérios: **corretude, completude, segurança, "
-                        "clareza e relevância**.\n\n"
+                        "Avalia as respostas dos modelos com um LLM como juiz "
+                        "(**ChatGPT, DeepSeek ou Gemini**), usando 5 critérios: "
+                        "**corretude, completude, segurança, clareza e relevância**.\n\n"
                         "Escolha o **idioma dos dados**: em português ele usa as colunas "
                         "`_pt` (ou `question`/`answer` no MedPT); em inglês usa as colunas "
                         "originais (ou `question_en`/`answer_en` no MedPT).")
@@ -754,10 +759,7 @@ class Interface:
                             label="🎲 Seleção aleatória", value=False, scale=1)
 
                     with gr.Row():
-                        geval_judge_model = gr.Dropdown(
-                            label="Modelo juiz",
-                            choices=["gpt-4o-mini","gpt-4o","gpt-4-turbo"],
-                            value="gpt-4o-mini", scale=1)
+                        geval_judge = _judge_dropdown()             # ← NOVO (substitui o modelo juiz)
                         geval_lang = gr.Dropdown(
                             label="Idioma dos dados",
                             choices=["pt", "en"],
@@ -770,7 +772,6 @@ class Interface:
 
                     btn_run_geval = gr.Button("⚖️ Avaliar com G-EVAL", variant="primary")
                     geval_status  = gr.Markdown()
-                    # geval_csv devolve: pergunta, modelo + 5 critérios + média = 8 colunas
                     geval_table   = gr.Dataframe(
                         headers=["pergunta","modelo"] + GEVAL_CRITERIA + ["media"],
                         datatype=["str","str"] + ["number"] * 6,
@@ -779,14 +780,14 @@ class Interface:
 
                     def run_geval_benchmark(
                         file_path, selected_models, n_samples, use_random,
-                        judge_model, selected_criteria,
+                        judge, selected_criteria,
                         openai, serp, gemini, deepseek, use_hist, tasks, lang
                     ):
                         return geval_csv(
                             file_path=file_path,
                             selected_models=selected_models,
                             n_samples=n_samples, use_random=use_random,
-                            judge_model=judge_model,
+                            judge=judge,
                             selected_criteria=selected_criteria,
                             openai_key=openai, serp_key=serp,
                             gemini_key=gemini, deepseek_key=deepseek,
@@ -800,7 +801,7 @@ class Interface:
                         fn=run_geval_benchmark,
                         inputs=[
                             geval_file_csv, geval_models, geval_num_samples, geval_random,
-                            geval_judge_model, geval_criteria,
+                            geval_judge, geval_criteria,
                             openai_key, serp_key, gemini_key, deepseek_key,
                             use_history, tasks_selector, geval_lang,
                         ],
