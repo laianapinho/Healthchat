@@ -2,8 +2,13 @@
 Executor único usado pelas abas de BERTScore / BioBERT / PubMedBERT.
 
 Cada aba só chama run_csv_eval(...) dizendo qual avaliador e qual idioma usar.
+
+Alteração: se o CSV não tiver coluna de resposta (mode="no_reference"), o executor
+só gera as respostas dos modelos e salva em CSV. Não calcula P/R/F1, porque não há
+referência para comparar.
 """
 import logging
+from datetime import datetime
 
 import pandas as pd
 
@@ -55,6 +60,19 @@ def run_csv_eval(
         for model in selected_models:
             model_response = extract_fn(report_text, model.upper()) or ""
 
+            # ── Sem coluna de resposta: só registra a resposta do modelo ──
+            if data["mode"] == "no_reference":
+                records.append({
+                    "pergunta": data["questions"][i],
+                    "modelo": model,
+                    "resposta": model_response,
+                })
+                table_rows.append([
+                    data["questions"][i], model, model_response,
+                    None, None, None,
+                ])
+                continue
+
             if data["mode"] == "pubmedqa":
                 pred = extract_decision(model_response)
                 resposta = extract_explanation(model_response)
@@ -77,6 +95,15 @@ def run_csv_eval(
                 data["questions"][i], model, model_response,
                 record["P"], record["R"], record["F1"],
             ])
+
+    if data["mode"] == "no_reference":
+        out_path = f"respostas_sem_referencia_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        pd.DataFrame(records).to_csv(out_path, index=False, encoding="utf-8-sig")
+        return (
+            "ℹ️ O CSV não tem coluna de resposta, então não há referência para o "
+            "BERTScore. Foram geradas apenas as respostas dos modelos "
+            f"({n} perguntas).\n\n✅ Respostas salvas em `{out_path}`."
+        ), table_rows
 
     saved_path = evaluator.save(records)
     summary = evaluator.summarize(records, selected_models, n)

@@ -9,6 +9,8 @@ Reconhece o tipo de CSV pelas colunas:
         (LiveQA pode ter varias respostas separadas por ' ||| ')
   - Qualquer outro (ex.: MedPT, ja em portugues, so com lang="pt"):
         detecta as colunas de pergunta/resposta como sempre foi feito.
+  - So pergunta, sem coluna de resposta: mode="no_reference"
+        (so gera as respostas dos modelos; nao ha como calcular BERTScore).
 """
 import re
 from typing import Any, Dict, List
@@ -151,7 +153,24 @@ def prepare_pt_items(df, n_samples, use_random, lang="pt") -> Dict[str, Any]:
         }
 
     # ── Outros CSVs: comportamento de sempre ──
-    q, a, _ = detect_csv_qa_columns(df)
+    try:
+        q, a, _ = detect_csv_qa_columns(df)
+    except ValueError:
+        # Sem coluna de resposta: se ao menos a pergunta existe, só gera as
+        # respostas dos modelos (sem referência, não há BERTScore).
+        if not q_pt:
+            raise
+        _check_formulas(df, [q_pt])
+        df = _sample(_drop_empty(df, [q_pt]), n_samples, use_random)
+        questions = [_clean_text(x) for x in df[q_pt]]
+        return {
+            "mode": "no_reference",
+            "prompts": questions,
+            "questions": questions,
+            "references": [[] for _ in questions],
+            "labels": None,
+        }
+
     df = _sample(_drop_empty(df, [q, a]), n_samples, use_random)
     questions = df[q].astype(str).tolist()
     return {

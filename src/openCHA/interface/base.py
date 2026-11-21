@@ -174,7 +174,8 @@ class Interface:
       8) PubMedBERTScore — CSV      (inglês)
 
     O juiz do G-EVAL (ChatGPT / DeepSeek / Gemini) pode ser escolhido no
-    Chat, na Arena e na aba G-EVAL.
+    Chat, na Arena e na aba G-EVAL. A rubrica (PDF/DOCX) é enviada uma vez,
+    no topo da página, e vale para os três.
     """
 
     def __init__(self):
@@ -221,6 +222,15 @@ class Interface:
                     gemini_key   = gr.Textbox(label="Gemini",   type="password", placeholder="AIza...")
                     deepseek_key = gr.Textbox(label="DeepSeek", type="password", placeholder="...")
 
+            # ── Documento de rubrica (G-EVAL) ─────────────────────────────────  ← NOVO
+            # Enviado uma vez; usado pelo G-EVAL do Chat, da Arena e da aba G-EVAL.
+            # type="filepath" entrega o CAMINHO do arquivo (string), que o
+            # rubrica_loader.py sabe ler (PDF ou DOCX).
+            with gr.Accordion("📄 Rubrica de avaliação (G-EVAL)", open=True):
+                rubrica_docx = gr.File(
+                    label="Documento de rubrica (PDF ou DOCX)",
+                    file_types=[".pdf", ".docx"], type="filepath")
+
             with gr.Accordion("⚙️ Configurações do Agente", open=False):
                 with gr.Row():
                     use_history    = gr.Checkbox(label="Usar histórico de conversa", value=True)
@@ -254,12 +264,13 @@ class Interface:
                             "Enter envia · Shift+Enter quebra linha</span>")
 
                     with gr.Accordion("⚖️ G-EVAL — Avaliar última resposta", open=False):
+                        # (o gabarito é ignorado nesta versão; campo mantido p/ compatibilidade)
                         chat_gabarito = gr.Textbox(
-                            label="Gabarito / resposta esperada (opcional)",
-                            placeholder="Deixe vazio para avaliar sem referência...",
+                            label="Gabarito / resposta esperada (não utilizado)",
+                            placeholder="Não é usado nesta etapa do protocolo.",
                             lines=3)
                         with gr.Row():
-                            chat_judge = _judge_dropdown()          # ← NOVO
+                            chat_judge = _judge_dropdown()
                             chat_geval_criteria = gr.CheckboxGroup(
                                 label="Critérios",
                                 choices=GEVAL_CRITERIA,
@@ -305,12 +316,14 @@ class Interface:
                             chat_hist[-1] = (msg, f"❌ Erro: {str(e)}")
                             yield "", chat_hist
 
+                    # ← NOVO: parâmetro `rubrica` (caminho do PDF/DOCX) no final
                     def run_geval_chat(chat_hist, gabarito, criteria,
-                                       openai, gemini, deepseek, judge):
+                                       openai, gemini, deepseek, judge, rubrica):
                         return geval_chat(
                             chat_hist=chat_hist, gabarito=gabarito, criteria=criteria,
                             openai_key=openai, gemini_key=gemini,
-                            deepseek_key=deepseek, judge=judge)
+                            deepseek_key=deepseek, judge=judge,
+                            rubrica_docx=rubrica)                      # ← NOVO
 
                     msg_chat.submit(fn=respond_chat_wrapper,
                         inputs=[msg_chat, openai_key, serp_key, gemini_key, deepseek_key,
@@ -329,7 +342,8 @@ class Interface:
                         outputs=[state_chat_history])
                     btn_geval_chat.click(fn=run_geval_chat,
                         inputs=[state_chat_history, chat_gabarito, chat_geval_criteria,
-                                openai_key, gemini_key, deepseek_key, chat_judge],
+                                openai_key, gemini_key, deepseek_key, chat_judge,
+                                rubrica_docx],                          # ← NOVO
                         outputs=[chat_geval_result, chat_geval_status])
 
                 # ── ABA 2: ARENA ──────────────────────────────────────────────
@@ -347,11 +361,11 @@ class Interface:
 
                     with gr.Accordion("⚖️ G-EVAL — Avaliar respostas", open=False):
                         arena_gabarito = gr.Textbox(
-                            label="Gabarito / resposta esperada (opcional)",
-                            placeholder="Deixe vazio para avaliar sem referência...",
+                            label="Gabarito / resposta esperada (não utilizado)",
+                            placeholder="Não é usado nesta etapa do protocolo.",
                             lines=2)
                         with gr.Row():
-                            arena_judge = _judge_dropdown()         # ← NOVO
+                            arena_judge = _judge_dropdown()
                             arena_geval_criteria = gr.CheckboxGroup(
                                 label="Critérios",
                                 choices=GEVAL_CRITERIA,
@@ -373,8 +387,9 @@ class Interface:
                         label="G-EVAL — Comparação entre modelos",
                         visible=False)
 
+                    # ← NOVO: parâmetro `rubrica` (caminho do PDF/DOCX) no final
                     def respond_arena(msg, gabarito, criteria, openai, serp, gemini,
-                                      deepseek, use_hist, tasks, models, judge):
+                                      deepseek, use_hist, tasks, models, judge, rubrica):
                         # IMPORTANTE: generator (usa yield). Use yield + return.
                         if not msg or not msg.strip():
                             yield "⚠️ Digite uma mensagem.", "", "", "", gr.update(visible=False), []
@@ -400,7 +415,8 @@ class Interface:
                         geval_rows, table_visible = geval_arena(
                             pergunta=msg, gabarito=gabarito, criteria=criteria,
                             openai_key=openai, models=models, responses=responses,
-                            judge=judge, gemini_key=gemini, deepseek_key=deepseek)
+                            judge=judge, gemini_key=gemini, deepseek_key=deepseek,
+                            rubrica_docx=rubrica)                      # ← NOVO
 
                         yield (
                             "✅ Pronto.",
@@ -414,7 +430,8 @@ class Interface:
                     btn_send_arena.click(fn=respond_arena,
                         inputs=[msg_arena, arena_gabarito, arena_geval_criteria,
                                 openai_key, serp_key, gemini_key, deepseek_key,
-                                use_history, tasks_selector, compare_models, arena_judge],
+                                use_history, tasks_selector, compare_models, arena_judge,
+                                rubrica_docx],                          # ← NOVO
                         outputs=[arena_status, card_chatgpt, card_gemini, card_deepseek,
                                  arena_geval_table, arena_geval_table])
 
@@ -737,10 +754,11 @@ class Interface:
                     gr.Markdown(
                         "Avalia as respostas dos modelos com um LLM como juiz "
                         "(**ChatGPT, DeepSeek ou Gemini**), usando 5 critérios: "
-                        "**corretude, completude, segurança, clareza e relevância**.\n\n"
-                        "Escolha o **idioma dos dados**: em português ele usa as colunas "
-                        "`_pt` (ou `question`/`answer` no MedPT); em inglês usa as colunas "
-                        "originais (ou `question_en`/`answer_en` no MedPT).")
+                        "**corretude, completude, segurança, clareza e relevância**, "
+                        "conforme a rubrica de cardiologia enviada em "
+                        "**📄 Rubrica de avaliação** (topo da página).\n\n"
+                        "Em português ele usa as colunas `_pt` (ou `question`/`answer` "
+                        "no MedPT).")
 
                     with gr.Row():
                         geval_file_csv = gr.File(
@@ -759,7 +777,7 @@ class Interface:
                             label="🎲 Seleção aleatória", value=False, scale=1)
 
                     with gr.Row():
-                        geval_judge = _judge_dropdown()             # ← NOVO (substitui o modelo juiz)
+                        geval_judge = _judge_dropdown()
                         geval_lang = gr.Dropdown(
                             label="Idioma dos dados",
                             choices=["pt", "en"],
@@ -778,10 +796,11 @@ class Interface:
                         row_count=5, col_count=(8,"fixed"), wrap=True,
                         label="Resultados G-EVAL")
 
+                    # ← NOVO: parâmetro `rubrica` (caminho do PDF/DOCX) no final
                     def run_geval_benchmark(
                         file_path, selected_models, n_samples, use_random,
                         judge, selected_criteria,
-                        openai, serp, gemini, deepseek, use_hist, tasks, lang
+                        openai, serp, gemini, deepseek, use_hist, tasks, lang, rubrica
                     ):
                         return geval_csv(
                             file_path=file_path,
@@ -795,6 +814,7 @@ class Interface:
                             respond_fn=respond,
                             extract_fn=extract_model_response_from_report,
                             lang=lang,
+                            rubrica_docx=rubrica,                      # ← NOVO
                         )
 
                     btn_run_geval.click(
@@ -804,6 +824,7 @@ class Interface:
                             geval_judge, geval_criteria,
                             openai_key, serp_key, gemini_key, deepseek_key,
                             use_history, tasks_selector, geval_lang,
+                            rubrica_docx,                               # ← NOVO
                         ],
                         outputs=[geval_status, geval_table])
 
